@@ -107,7 +107,7 @@ jobs:
   smoke-canvas:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.CANVAS_BASE_URL && secrets.CANVAS_TOKEN }}
+    if: ${{ vars.CANVAS_BASE_URL != '' }}
     env:
       CANVAS_BASE_URL: ${{ vars.CANVAS_BASE_URL }}
       CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
@@ -119,18 +119,29 @@ jobs:
           cache: 'npm'
       - run: npm ci || npm install
 
+      - name: Check Canvas envs
+        id: canvas_env
+        run: |
+          if [ -z "${CANVAS_BASE_URL:-}" ] || [ -z "${CANVAS_TOKEN:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Canvas envs missing; skipping Canvas smoke."
+          fi
+
       - name: Install CLI deps
+        if: steps.canvas_env.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y jq netcat-openbsd
 
       - name: Start server
+        if: steps.canvas_env.outputs.skip != 'true'
         run: |
           nohup npx tsx src/http.ts > server.log 2>&1 &
           echo $! > server.pid
           timeout 15 bash -c 'until nc -z 127.0.0.1 8787; do sleep 0.5; done'
 
       - name: Canvas smoke (courses → modules)
+        if: steps.canvas_env.outputs.skip != 'true'
         run: |
           set -euo pipefail
           H=$(mktemp)
@@ -154,13 +165,13 @@ jobs:
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_courses","arguments":{}}}' | jq .
 
       - name: Stop server if running
-        if: always()
+        if: always() && steps.canvas_env.outputs.skip != 'true'
         run: |
           if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
           pkill -f "tsx src/http.ts" || true
 
       - name: Upload logs
-        if: always()
+        if: always() && steps.canvas_env.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: canvas-ci-logs
