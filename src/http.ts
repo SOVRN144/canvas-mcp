@@ -10,13 +10,16 @@ const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 // ---- MCP server + one simple tool (Echo) ----
 const server = new McpServer({ name: 'sanity-mcp', version: '0.0.5' });
 
-const EchoInput = z.object({ text: z.string().describe('text to echo') });
+const EchoInputShape = {
+  text: z.string().describe('text to echo')
+};
+const EchoInput = z.object(EchoInputShape);
 server.registerTool(
   'echo',
   {
     title: 'Echo',
     description: 'Returns the text you send',
-    inputSchema: EchoInput
+    inputSchema: EchoInputShape
   },
   (args) => {
     const { text } = EchoInput.parse(args);
@@ -40,7 +43,7 @@ const isInitialize = (b: any) => b && b.jsonrpc === '2.0' && b.method === 'initi
 app.post('/mcp', async (req: Request, res: Response) => {
   try {
     const sid = req.header(MCP_SESSION_HEADER) || '';
-    let transport = sid ? sessions[sid] : undefined;
+    const transport = sid ? sessions[sid] : undefined;
 
     if (!transport) {
       // first contact MUST be initialize without a session header
@@ -53,15 +56,19 @@ app.post('/mcp', async (req: Request, res: Response) => {
         return;
       }
 
-      const t = new StreamableHTTPServerTransport({
+      const newTransport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newId) => { sessions[newId] = t; },
-        onsessionclosed: (closedId) => { delete sessions[closedId]; }
+        onsessioninitialized: (newId) => {
+          sessions[newId] = newTransport;
+        },
+        onsessionclosed: (closedId) => {
+          delete sessions[closedId];
+        }
       });
 
-      await server.connect(t);
-      await t.handleRequest(req as any, res as any, req.body);
+      await server.connect(newTransport);
+      await newTransport.handleRequest(req as any, res as any, req.body);
       return;
     }
 
@@ -90,7 +97,11 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   const sid = req.header(MCP_SESSION_HEADER) || '';
   const transport = sid ? sessions[sid] : undefined;
   if (!transport) return res.status(400).send('Invalid or missing session ID');
-  try { transport.close(); } finally { delete sessions[sid]; }
+  try {
+    transport.close();
+  } finally {
+    delete sessions[sid];
+  }
   res.status(204).end();
 });
 
