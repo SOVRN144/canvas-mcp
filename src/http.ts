@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -34,6 +35,28 @@ server.registerTool(
   (args) => {
     const { text } = EchoInput.parse(args);
     return { content: [{ type: 'text', text }] };
+  }
+);
+
+const EnvCheckInputShape = {} as const;
+const EnvCheckInput = z.object(EnvCheckInputShape);
+server.registerTool(
+  'env_check',
+  {
+    title: 'Env check',
+    description: 'Reports if Canvas env vars are present (no secrets returned)',
+    inputSchema: EnvCheckInputShape,
+  },
+  (args) => {
+    EnvCheckInput.parse(args ?? {});
+    const summary = {
+      hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
+      hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
+    };
+    return {
+      content: [{ type: 'text', text: JSON.stringify(summary) }],
+      structuredContent: summary,
+    };
   }
 );
 
