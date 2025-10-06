@@ -63,7 +63,7 @@ jobs:
                -H 'Content-Type: application/json' \
                --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
                http://127.0.0.1:8787/mcp | jq . > init.json
-          awk -F': ' '/^Mcp-Session-Id:/ {print $2}' "$H" | tr -d '\r' > session.txt
+          awk -F': *' 'tolower($1)=="mcp-session-id" {print $2}' "$H" | tr -d '\r' > session.txt
           test -s session.txt
 
       - name: Smoke test (tools/list → echo)
