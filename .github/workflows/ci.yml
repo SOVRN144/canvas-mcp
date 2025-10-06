@@ -30,44 +30,76 @@ jobs:
           cache: 'npm'
       - run: npm ci || npm install
 
+      - name: Install CLI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq netcat-openbsd
+
       - name: Start server
         run: |
+          set -euo pipefail
           nohup npx tsx src/http.ts > server.log 2>&1 &
           echo $! > server.pid
-          # wait until 8787 is listening
-          timeout 15 bash -c 'until nc -z 127.0.0.1 8787; do sleep 0.5; done'
+          # Active readiness probe: try initialize up to 30s
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -sSf -H 'Accept: application/json, text/event-stream' \
+                   -H 'Content-Type: application/json' \
+                   --data '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+                   http://127.0.0.1:8787/mcp >/dev/null; then
+              ready=1; break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Server never responded to initialize within 30s"
+            echo "----- server.log -----"
+            tail -n +1 server.log || true
+            exit 1
+          fi
+          # Do a proper initialize to capture the session header
+          H=$(mktemp)
+          curl -sD "$H" -H 'Accept: application/json, text/event-stream' \
+               -H 'Content-Type: application/json' \
+               --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+               http://127.0.0.1:8787/mcp | jq . > init.json
+          awk -F': ' '/^Mcp-Session-Id:/ {print $2}' "$H" | tr -d '\r' > session.txt
+          test -s session.txt
 
-      - name: Smoke test (init → tools/list → echo)
+      - name: Smoke test (tools/list → echo)
         run: |
           set -euo pipefail
-          H=$(mktemp)
-          INIT=$(curl -sD "$H" http://127.0.0.1:8787/mcp \
-            -H 'Accept: application/json, text/event-stream' \
-            -H 'Content-Type: application/json' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}')
-          echo "$INIT"
-          SESSION=$(awk -F': ' '/^Mcp-Session-Id:/ {print $2}' "$H" | tr -d '\r')
-          test -n "$SESSION"
-
-          LIST=$(curl -s http://127.0.0.1:8787/mcp \
+          SESSION=$(cat session.txt)
+          LIST=$(curl -sS http://127.0.0.1:8787/mcp \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             -H "Mcp-Session-Id: $SESSION" \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-          echo "$LIST" | jq -e '.result.tools | any(.name == "echo")'
-
-          ECHO=$(curl -s http://127.0.0.1:8787/mcp \
+          echo "$LIST" | jq .
+          # portable jq: map(..)|any
+          echo "$LIST" | jq -e '.result.tools | map(.name=="echo") | any'
+          ECHO=$(curl -sS http://127.0.0.1:8787/mcp \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             -H "Mcp-Session-Id: $SESSION" \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}')
           echo "$ECHO" | jq -e '.result.content[0].text == "hi"'
 
-      - name: Tear down
+      - name: Stop server if running
         if: always()
         run: |
-          kill "$(cat server.pid)" || true
-          sleep 1
+          set +e
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" || true
+          fi
           pkill -f "tsx src/http.ts" || true
-          echo "---- server.log ----"
-          tail -n +1 server.log || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            server.log
+            init.json
+            session.txt
