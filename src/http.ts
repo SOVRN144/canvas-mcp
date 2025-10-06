@@ -1,5 +1,5 @@
 import cors from 'cors';
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
+const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 // Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
 const rawSessionTtl = process.env.SESSION_TTL_MS;
 const SESSION_TTL_MS = (() => {
@@ -47,17 +48,26 @@ const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
 app.use(
   cors((req, callback) => {
     const origin = req.header('Origin');
-    if (!origin) {
+    const allow = !origin || allowedOrigins.includes(origin);
+    if (allow) {
       callback(null, { origin: true, exposedHeaders: [MCP_SESSION_HEADER] });
-      return;
-    }
-    if (allowedOrigins.includes(origin)) {
-      callback(null, { origin, exposedHeaders: [MCP_SESSION_HEADER] });
       return;
     }
     callback(new Error('Not allowed by CORS'));
   })
 );
+
+app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (err instanceof Error && err.message === 'Not allowed by CORS') {
+    res.status(403).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'CORS origin not allowed' },
+      id: null,
+    });
+    return;
+  }
+  next(err);
+});
 
 // Parse JSON only on POST /mcp
 app.post(
@@ -103,29 +113,46 @@ const normalizeInitializePayload = (body: unknown): unknown => {
       version: '0.0.0',
     };
   }
-  if (!('protocolVersion' in params) && 'protocolVersion' in request) {
-    params.protocolVersion = request.protocolVersion;
+  if (!('protocolVersion' in params)) {
+    params.protocolVersion = DEFAULT_PROTOCOL_VERSION;
   }
   return { ...request, params };
 };
 
-const touch = (sessionId: string) => {
-  const entry = sessions[sessionId];
-  if (entry) {
-    entry.lastSeen = Date.now();
+const isSessionExpired = (entry: SessionEntry) => Date.now() - entry.lastSeen > SESSION_TTL_MS;
+
+const closeSession = (sessionId: string, entry: SessionEntry) => {
+  try {
+    entry.transport.close();
+  } catch {
+    // ignore shutdown errors
   }
+  delete sessions[sessionId];
+};
+
+const getActiveSession = (sessionId: string): SessionEntry | undefined => {
+  if (!sessionId) {
+    return undefined;
+  }
+  const entry = sessions[sessionId];
+  if (!entry) {
+    return undefined;
+  }
+  if (isSessionExpired(entry)) {
+    closeSession(sessionId, entry);
+    return undefined;
+  }
+  return entry;
 };
 
 setInterval(() => {
+  if (SESSION_TTL_MS <= 0) {
+    return;
+  }
   const now = Date.now();
   for (const [sessionId, entry] of Object.entries(sessions)) {
     if (now - entry.lastSeen > SESSION_TTL_MS) {
-      try {
-        entry.transport.close();
-      } catch {
-        // ignore close errors during cleanup
-      }
-      delete sessions[sessionId];
+      closeSession(sessionId, entry);
     }
   }
 }, 60_000).unref();
@@ -133,14 +160,22 @@ setInterval(() => {
 app.post('/mcp', async (req: Request, res: Response) => {
   try {
     const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
-    const existing = sessionId ? sessions[sessionId] : undefined;
+    const requestId =
+      req.body && typeof req.body === 'object'
+        ? (req.body as Record<string, unknown>).id ?? null
+        : null;
+    const existing = getActiveSession(sessionId);
 
     if (!existing) {
-      if (sessionId || !isInitialize(req.body)) {
-        const requestId =
-          req.body && typeof req.body === 'object'
-            ? (req.body as Record<string, unknown>).id ?? null
-            : null;
+      if (sessionId) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Invalid or missing session ID' },
+          id: requestId,
+        });
+        return;
+      }
+      if (!isInitialize(req.body)) {
         res.status(400).json({
           jsonrpc: '2.0',
           error: {
@@ -172,7 +207,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
       return;
     }
 
-    touch(sessionId);
+    existing.lastSeen = Date.now();
     await existing.transport.handleRequest(asNode(req), asNodeRes(res), req.body);
   } catch (error) {
     if (!res.headersSent) {
@@ -192,7 +227,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
 
 app.get('/mcp', async (req: Request, res: Response) => {
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
-  const entry = sessionId ? sessions[sessionId] : undefined;
+  const entry = getActiveSession(sessionId);
   if (!entry) {
     res.status(400).json({
       jsonrpc: '2.0',
@@ -201,13 +236,13 @@ app.get('/mcp', async (req: Request, res: Response) => {
     });
     return;
   }
-  touch(sessionId);
+  entry.lastSeen = Date.now();
   await entry.transport.handleRequest(asNode(req), asNodeRes(res));
 });
 
 app.delete('/mcp', async (req: Request, res: Response) => {
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
-  const entry = sessionId ? sessions[sessionId] : undefined;
+  const entry = getActiveSession(sessionId);
   if (!entry) {
     res.status(400).json({
       jsonrpc: '2.0',
