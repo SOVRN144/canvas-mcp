@@ -1,6 +1,10 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
+import axios, { AxiosInstance } from 'axios';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -59,6 +63,271 @@ server.registerTool(
     };
   }
 );
+
+const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL?.trim() || '';
+const CANVAS_TOKEN = process.env.CANVAS_TOKEN?.trim() || '';
+const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
+
+const canvasClient: AxiosInstance | null = hasCanvas
+  ? axios.create({
+      baseURL: CANVAS_BASE_URL,
+      headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
+      timeout: 15_000,
+    })
+  : null;
+
+const parseCanvasErrors = (data: unknown): string | null => {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+  const anyData = data as Record<string, unknown>;
+  if (Array.isArray(anyData.errors)) {
+    return anyData.errors
+      .map((err) => {
+        if (typeof err === 'string') return err;
+        if (err && typeof err === 'object' && 'message' in err && typeof err.message === 'string') {
+          return err.message;
+        }
+        return JSON.stringify(err);
+      })
+      .join('; ');
+  }
+  if (typeof anyData.message === 'string') {
+    return anyData.message;
+  }
+  return null;
+};
+
+const raiseCanvasError = (error: unknown): never => {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const statusText = error.response?.statusText;
+    const details = parseCanvasErrors(error.response?.data);
+    const fallback = typeof error.message === 'string' ? error.message : 'Canvas request failed';
+    const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
+      .filter(Boolean)
+      .join(': ');
+    throw new Error(description);
+  }
+  if (error instanceof Error) {
+    throw error;
+  }
+  throw new Error(String(error));
+};
+
+const withCanvasErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
+  try {
+    return await operation();
+  } catch (error) {
+    raiseCanvasError(error);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+};
+
+const parseNextLink = (linkHeader?: string): string | null => {
+  if (!linkHeader) return null;
+  const segments = linkHeader.split(',');
+  for (const segment of segments) {
+    const match = segment.trim().match(/<([^>]+)>;[^;]*rel="next"/i);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+};
+
+const getAll = async <T = any>(url: string, params?: Record<string, unknown>): Promise<T[]> => {
+  if (!canvasClient) {
+    throw new Error('Canvas client not configured');
+  }
+  const results: T[] = [];
+  let nextUrl: string | null = url;
+  let query = params;
+  while (nextUrl) {
+    try {
+      const response = await canvasClient.get(nextUrl, { params: query });
+      const data = response.data;
+      if (!Array.isArray(data)) {
+        const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
+        throw new Error(msg);
+      }
+      results.push(...(data as T[]));
+      const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
+      if (!next) {
+        break;
+      }
+      nextUrl = next;
+      query = undefined;
+    } catch (error) {
+      raiseCanvasError(error);
+    }
+  }
+  return results;
+};
+
+const sanitizeFilename = (name: string): string =>
+  name.replace(/[\\/:*?"<>|]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'file';
+
+const fetchModules = async (courseId: number, includeItems: boolean) => {
+  const params: Record<string, unknown> = { per_page: 100 };
+  if (includeItems) {
+    params['include[]'] = 'items';
+  }
+  const modules = await getAll(`/api/v1/courses/${courseId}/modules`, params);
+  if (!includeItems) {
+    return modules;
+  }
+  const withItems = await Promise.all(
+    modules.map(async (module: any) => {
+      if (Array.isArray(module.items) && module.items.length > 0) {
+        return module;
+      }
+      const items = await getAll(`/api/v1/courses/${courseId}/modules/${module.id}/items`, {
+        per_page: 100,
+      });
+      return { ...module, items };
+    })
+  );
+  return withItems;
+};
+
+if (hasCanvas && canvasClient) {
+  const ListCoursesInputShape = {} as const;
+  const ListCoursesInput = z.object(ListCoursesInputShape);
+  server.registerTool(
+    'list_courses',
+    {
+      title: 'List courses',
+      description: 'Lists active student enrollments',
+      inputSchema: ListCoursesInputShape,
+    },
+    async (args) => {
+      ListCoursesInput.parse(args ?? {});
+      return withCanvasErrors(async () => {
+        const courses = await getAll<any>('/api/v1/courses', {
+          per_page: 100,
+          'enrollment_type[]': 'student',
+          enrollment_state: 'active',
+        });
+        const mapped = courses.map((course: any) => {
+          const id = course.id;
+          const name = course.name || course.course_code || course.short_name || `course-${id}`;
+          return { id, name };
+        });
+        const preview = { count: mapped.length, sample: mapped.slice(0, 5) };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(preview) }],
+          structuredContent: { courses: mapped },
+        };
+      });
+    }
+  );
+
+  const ListModulesInputShape = {
+    courseId: z.number(),
+    includeItems: z.boolean().optional(),
+  } as const;
+  const ListModulesInput = z.object(ListModulesInputShape);
+  server.registerTool(
+    'list_modules',
+    {
+      title: 'List modules',
+      description: 'Lists modules (optionally including items) for a course',
+      inputSchema: ListModulesInputShape,
+    },
+    async (args) => {
+      const { courseId, includeItems = true } = ListModulesInput.parse(args ?? {});
+      return withCanvasErrors(async () => {
+        const modules = await fetchModules(courseId, includeItems);
+        const preview = { count: modules.length, sample: modules.slice(0, 3) };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(preview) }],
+          structuredContent: { modules },
+        };
+      });
+    }
+  );
+
+  const ListFilesInputShape = {
+    courseId: z.number(),
+  } as const;
+  const ListFilesInput = z.object(ListFilesInputShape);
+  server.registerTool(
+    'list_files_from_modules',
+    {
+      title: 'List files from modules',
+      description: 'Lists files reachable via modules for a course',
+      inputSchema: ListFilesInputShape,
+    },
+    async (args) => {
+      const { courseId } = ListFilesInput.parse(args ?? {});
+      return withCanvasErrors(async () => {
+        const modules = await fetchModules(courseId, true);
+        const fileItems = modules
+          .flatMap((module: any) => (Array.isArray(module.items) ? module.items : []))
+          .filter((item: any) => item?.type === 'File' && item?.content_id);
+        const files = await Promise.all(
+          fileItems.map((item: any) =>
+            withCanvasErrors(async () => {
+              const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
+              const file = response.data;
+              const id = file.id;
+              const name = file.display_name || file.filename || `file-${id}`;
+              const updatedAt = file.updated_at || file.modified_at || null;
+              const url = file.url || file.public_url || null;
+              return { id, name, updated_at: updatedAt, url };
+            })
+          )
+        );
+        const preview = { count: files.length, sample: files.slice(0, 5) };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(preview) }],
+          structuredContent: { files },
+        };
+      });
+    }
+  );
+
+  const DownloadFileInputShape = {
+    fileId: z.number(),
+  } as const;
+  const DownloadFileInput = z.object(DownloadFileInputShape);
+  server.registerTool(
+    'download_file',
+    {
+      title: 'Download file',
+      description: 'Downloads a file by id to a temporary location',
+      inputSchema: DownloadFileInputShape,
+    },
+    async (args) => {
+      const { fileId } = DownloadFileInput.parse(args ?? {});
+      return withCanvasErrors(async () => {
+        const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
+        const file = metadataResponse.data;
+        const downloadUrl = file.url || file.public_url;
+        if (!downloadUrl) {
+          throw new Error('File does not expose a downloadable URL');
+        }
+        const baseName = file.display_name || file.filename || `file-${fileId}`;
+        const safeBase = sanitizeFilename(baseName);
+        const extension = path.extname(safeBase);
+        const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
+        const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
+        const targetPath = path.join(os.tmpdir(), filename);
+        const downloadResponse = await axios.get<ArrayBuffer>(downloadUrl, {
+          responseType: 'arraybuffer',
+          headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
+        });
+        await fs.writeFile(targetPath, Buffer.from(downloadResponse.data));
+        const payload = { path: targetPath };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      });
+    }
+  );
+}
 
 // ---- Express wiring ----
 const app = express();
@@ -283,4 +552,13 @@ app.delete('/mcp', async (req: Request, res: Response) => {
 });
 
 const PORT = Number(process.env.PORT ?? '8787');
-app.listen(PORT, () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
+if (SHOULD_LISTEN) {
+  app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+} else {
+  const toolEntries = Object.entries((server as any)._registeredTools ?? {}) as [string, any][];
+  const toolNames = toolEntries
+    .filter(([, tool]) => tool?.enabled !== false)
+    .map(([name]) => name);
+  console.log(JSON.stringify({ registeredTools: toolNames }));
+}
