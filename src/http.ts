@@ -410,6 +410,16 @@ app.post(
   })
 );
 
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true });
+});
+
+if (process.env.DEBUG_HTTP === '1') {
+  app.get('/_debug/sessions', (_req, res) => {
+    res.json({ activeSessions: Object.keys(sessions).length });
+  });
+}
+
 type NodeReq = IncomingMessage;
 type NodeRes = ServerResponse;
 const asNode = (req: Request): NodeReq => req as unknown as NodeReq;
@@ -518,9 +528,11 @@ app.post('/mcp', async (req: Request, res: Response) => {
         });
         return;
       }
+      const preSessionId = randomUUID();
+      res.setHeader(MCP_SESSION_HEADER, preSessionId);
       const transport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,
-        sessionIdGenerator: () => randomUUID(),
+        sessionIdGenerator: () => preSessionId,
         onsessioninitialized: (newId) => {
           sessions[newId] = {
             transport,

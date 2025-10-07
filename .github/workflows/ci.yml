@@ -179,3 +179,11 @@ jobs:
           path: |
             server.log
             init.json
+
+  smoke_public:
+    if: ${{ vars.PUBLIC_MCP_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: bash scripts/smoke-public.sh "${{ vars.PUBLIC_MCP_URL }}"
