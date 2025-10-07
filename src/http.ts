@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -451,6 +451,22 @@ interface SessionEntry {
   lastSeen: number;
 }
 const sessions = new Map<string, SessionEntry>();
+const pendingSessions = new Map<string, Promise<void>>();
+
+const waitForPendingSession = async (sessionId: string): Promise<void> => {
+  if (!sessionId) {
+    return;
+  }
+  const pending = pendingSessions.get(sessionId);
+  if (!pending) {
+    return;
+  }
+  try {
+    await pending;
+  } catch {
+    // initialization failures are surfaced on the original request
+  }
+};
 
 const isInitialize = (body: unknown) =>
   typeof body === 'object' && body !== null && (body as { method?: unknown }).method === 'initialize';
@@ -493,7 +509,10 @@ const closeSession = (
     return;
   }
 
-  sessions.delete(sessionId);
+  const mappedEntry = sessions.get(sessionId);
+  if (!entry || mappedEntry === entry) {
+    sessions.delete(sessionId);
+  }
 
   if (!options.initiatedByTransport) {
     try {
@@ -517,7 +536,18 @@ const getActiveSession = (sessionId: string): SessionEntry | undefined => {
     return undefined;
   }
   if (isSessionExpired(entry)) {
-    closeSession(sessionId, entry);
+    if (sessions.get(sessionId) === entry) {
+      closeSession(sessionId, entry);
+    } else {
+      try {
+        entry.transport.close();
+      } catch {
+        // ignore shutdown errors
+      }
+      entry.server.close().catch(() => {
+        // ignore close errors
+      });
+    }
     return undefined;
   }
   return entry;
@@ -542,11 +572,15 @@ app.post('/mcp', async (req: Request, res: Response) => {
       req.body && typeof req.body === 'object'
         ? (req.body as Record<string, unknown>).id ?? null
         : null;
-    const existing = getActiveSession(sessionId);
+    let existing = getActiveSession(sessionId);
+    if (!existing && sessionId) {
+      await waitForPendingSession(sessionId);
+      existing = getActiveSession(sessionId);
+    }
 
     if (!existing) {
       if (sessionId) {
-        res.status(400).json({
+        res.status(200).json({
           jsonrpc: '2.0',
           error: { code: -32000, message: 'Invalid or missing session ID' },
           id: requestId,
@@ -567,6 +601,15 @@ app.post('/mcp', async (req: Request, res: Response) => {
       const { server: sessionServer, toolNames } = createServer();
       const preSessionId = randomUUID();
       let initializedSessionId: string | undefined;
+      let pending: Promise<void> | null = null;
+      const pendingKeys = new Set<string>();
+      const registerPendingKey = (key: string) => {
+        if (!pending) {
+          return;
+        }
+        pendingKeys.add(key);
+        pendingSessions.set(key, pending);
+      };
 
       res.setHeader(MCP_SESSION_HEADER, preSessionId);
       const transport = new StreamableHTTPServerTransport({
@@ -576,8 +619,12 @@ app.post('/mcp', async (req: Request, res: Response) => {
           const activeId = newId ?? preSessionId;
           initializedSessionId = activeId;
           if (!res.headersSent) {
-            res.setHeader(MCP_SESSION_HEADER, activeId);
+            const currentHeader = res.getHeader(MCP_SESSION_HEADER);
+            if (currentHeader !== activeId) {
+              res.setHeader(MCP_SESSION_HEADER, activeId);
+            }
           }
+          registerPendingKey(activeId);
           sessions.set(activeId, {
             server: sessionServer,
             transport,
@@ -591,24 +638,40 @@ app.post('/mcp', async (req: Request, res: Response) => {
         },
       });
 
-      await sessionServer.connect(transport);
-      const payload = normalizeInitializePayload(req.body);
-      try {
-        await transport.handleRequest(asNode(req), asNodeRes(res), payload);
-      } catch (error) {
-        if (initializedSessionId) {
-          closeSession(initializedSessionId);
-        } else {
-          try {
-            transport.close();
-          } catch {
-            // ignore shutdown errors
+      const run = async () => {
+        await sessionServer.connect(transport);
+        const payload = normalizeInitializePayload(req.body);
+        try {
+          await transport.handleRequest(asNode(req), asNodeRes(res), payload);
+        } catch (error) {
+          if (initializedSessionId) {
+            closeSession(initializedSessionId);
+          } else {
+            try {
+              transport.close();
+            } catch {
+              // ignore shutdown errors
+            }
+            sessionServer.close().catch(() => {
+              // ignore close errors
+            });
           }
-          sessionServer.close().catch(() => {
-            // ignore close errors
-          });
+          throw error;
         }
-        throw error;
+      };
+
+      const pendingPromise = run();
+      pending = pendingPromise;
+      registerPendingKey(preSessionId);
+
+      try {
+        await pendingPromise;
+      } finally {
+        for (const key of pendingKeys) {
+          if (pendingSessions.get(key) === pendingPromise) {
+            pendingSessions.delete(key);
+          }
+        }
       }
       return;
     }
@@ -633,7 +696,11 @@ app.post('/mcp', async (req: Request, res: Response) => {
 
 app.get('/mcp', async (req: Request, res: Response) => {
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
-  const entry = getActiveSession(sessionId);
+  let entry = getActiveSession(sessionId);
+  if (!entry) {
+    await waitForPendingSession(sessionId);
+    entry = getActiveSession(sessionId);
+  }
   if (!entry) {
     res.status(400).json({
       jsonrpc: '2.0',
@@ -648,7 +715,11 @@ app.get('/mcp', async (req: Request, res: Response) => {
 
 app.delete('/mcp', async (req: Request, res: Response) => {
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
-  const entry = getActiveSession(sessionId);
+  let entry = getActiveSession(sessionId);
+  if (!entry) {
+    await waitForPendingSession(sessionId);
+    entry = getActiveSession(sessionId);
+  }
   if (!entry) {
     res.status(400).json({
       jsonrpc: '2.0',
@@ -663,8 +734,49 @@ app.delete('/mcp', async (req: Request, res: Response) => {
 
 const PORT = Number(process.env.PORT ?? '8787');
 const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
+let httpServer: Server | null = null;
+let shuttingDown = false;
+
+const stopHttpServer = async (): Promise<void> => {
+  if (!httpServer) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    httpServer?.close(() => {
+      resolve();
+    });
+  });
+  httpServer = null;
+};
+
+const handleShutdown = async (signal: NodeJS.Signals) => {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  const pending = Array.from(pendingSessions.values());
+  pendingSessions.clear();
+  await stopHttpServer();
+  await Promise.allSettled(pending);
+  for (const [sessionId, entry] of Array.from(sessions.entries())) {
+    closeSession(sessionId, entry);
+  }
+  sessions.clear();
+  if (signal === 'SIGINT') {
+    console.log('Received SIGINT, shut down gracefully.');
+  } else if (signal === 'SIGTERM') {
+    console.log('Received SIGTERM, shut down gracefully.');
+  }
+};
+
+(['SIGINT', 'SIGTERM'] as const).forEach((signal) => {
+  process.once(signal, () => {
+    void handleShutdown(signal);
+  });
+});
+
 if (SHOULD_LISTEN) {
-  app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+  httpServer = app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
 } else {
   const { toolNames } = createServer();
   console.log(JSON.stringify({ registeredTools: toolNames }, null, 2));
