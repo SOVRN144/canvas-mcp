@@ -89,7 +89,7 @@ const ci = (msg: string) => console.log(msg);
     .set('Mcp-Session-Id', sessionId)
     .send({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} });
   const afterMessage = after.body?.error?.message ?? '';
-  afterOk = after.status === 200 && /invalid or missing session id/i.test(afterMessage);
+  afterOk = after.status === 401 && /invalid or missing session id/i.test(afterMessage);
   if (!afterOk) pass = false;
   console.log({ status: after.status, body: after.body });
 

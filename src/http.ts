@@ -589,7 +589,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
 
     if (!existing) {
       if (sessionId) {
-        res.status(200).json({
+        res.status(401).json({
           jsonrpc: '2.0',
           error: { code: -32000, message: 'Invalid or missing session ID' },
           id: requestId,
