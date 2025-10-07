@@ -868,8 +868,6 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-app.use(jsonParseErrorHandler);
-
 const PORT = Number(process.env.PORT ?? '8787');
 const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
 
