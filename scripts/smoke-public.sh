@@ -21,7 +21,7 @@ curl -sD "$header_file" "${PUBLIC_BASE%/}/mcp" \
   -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' | jq -e '.result.protocolVersion=="2024-11-05"'
 
-SESSION="$(awk 'BEGIN{IGNORECASE=1}/^Mcp-Session-Id:/{print $2}' "$header_file" | tr -d '\r')"
+SESSION="$(awk -F': *' '{if (tolower($1)=="mcp-session-id") print $2}' "$header_file" | tr -d '\r')"
 if [[ -z "${SESSION}" ]]; then
   echo "!! No Mcp-Session-Id header in initialize response" >&2
   echo "---- headers ----" >&2
