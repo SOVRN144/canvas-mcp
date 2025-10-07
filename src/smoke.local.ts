@@ -18,7 +18,10 @@ const ci = (msg: string) => console.log(msg);
   let listOk = false;
   let echoOk = false;
   let badOk = false;
+  let getMissingOk = false;
+  let getInvalidOk = false;
   let delOk = false;
+  let deleteInvalidOk = false;
   let afterOk = false;
 
   ci('### /healthz');
@@ -26,6 +29,13 @@ const ci = (msg: string) => console.log(msg);
   healthOk = health.status === 200 && typeof health.body === 'object';
   if (!healthOk) pass = false;
   console.log({ status: health.status, body: health.body });
+
+  ci('### GET /mcp (missing session)');
+  const getMissing = await request(app).get('/mcp');
+  const missingMessage = getMissing.body?.error?.message ?? '';
+  getMissingOk = getMissing.status === 400 && /missing session id/i.test(missingMessage);
+  if (!getMissingOk) pass = false;
+  console.log({ status: getMissing.status, body: getMissing.body });
 
   ci('### initialize');
   const init = await request(app)
@@ -75,11 +85,29 @@ const ci = (msg: string) => console.log(msg);
   if (!badOk) pass = false;
   console.log({ status: bad.status, body: bad.body });
 
+  ci('### GET /mcp (invalid session)');
+  const getInvalid = await request(app)
+    .get('/mcp')
+    .set('Mcp-Session-Id', `${sessionId}-invalid`);
+  const invalidGetMessage = getInvalid.body?.error?.message ?? '';
+  getInvalidOk = getInvalid.status === 401 && /invalid session id/i.test(invalidGetMessage);
+  if (!getInvalidOk) pass = false;
+  console.log({ status: getInvalid.status, body: getInvalid.body });
+
   ci('### DELETE /mcp');
   const del = await request(app).delete('/mcp').set('Mcp-Session-Id', sessionId);
   delOk = del.status === 204;
   if (!delOk) pass = false;
   console.log({ status: del.status });
+
+  ci('### DELETE /mcp (invalid session)');
+  const deleteInvalid = await request(app)
+    .delete('/mcp')
+    .set('Mcp-Session-Id', `${sessionId}-invalid`);
+  const invalidDeleteMessage = deleteInvalid.body?.error?.message ?? '';
+  deleteInvalidOk = deleteInvalid.status === 401 && /invalid session id/i.test(invalidDeleteMessage);
+  if (!deleteInvalidOk) pass = false;
+  console.log({ status: deleteInvalid.status, body: deleteInvalid.body });
 
   ci('### tools/list after delete (should error)');
   const after = await request(app)
@@ -89,12 +117,23 @@ const ci = (msg: string) => console.log(msg);
     .set('Mcp-Session-Id', sessionId)
     .send({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} });
   const afterMessage = after.body?.error?.message ?? '';
-  afterOk = after.status === 200 && /invalid or missing session id/i.test(afterMessage);
+  afterOk = after.status === 401 && /invalid session id/i.test(afterMessage);
   if (!afterOk) pass = false;
   console.log({ status: after.status, body: after.body });
 
   console.log('\n=== SUMMARY ===');
-  console.log({ healthOk, initOk, listOk, echoOk, badOk, delOk, afterOk });
+  console.log({
+    healthOk,
+    getMissingOk,
+    initOk,
+    listOk,
+    echoOk,
+    badOk,
+    getInvalidOk,
+    delOk,
+    deleteInvalidOk,
+    afterOk,
+  });
 
   process.exit(pass ? 0 : 1);
 })().catch((err) => {
