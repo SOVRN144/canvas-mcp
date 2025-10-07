@@ -591,7 +591,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
       if (sessionId) {
         res.status(401).json({
           jsonrpc: '2.0',
-          error: { code: -32000, message: 'Invalid or missing session ID' },
+          error: { code: -32000, message: 'Invalid session ID' },
           id: requestId,
         });
         return;
@@ -719,9 +719,11 @@ app.get('/mcp', async (req: Request, res: Response) => {
     entry = getActiveSession(sessionId);
   }
   if (!entry) {
-    res.status(400).json({
+    const status = sessionId ? 401 : 400;
+    const message = sessionId ? 'Invalid session ID' : 'Missing session ID';
+    res.status(status).json({
       jsonrpc: '2.0',
-      error: { code: -32000, message: 'Invalid or missing session ID' },
+      error: { code: -32000, message },
       id: null,
     });
     return;
@@ -746,9 +748,11 @@ app.delete('/mcp', async (req: Request, res: Response) => {
     entry = getActiveSession(sessionId);
   }
   if (!entry) {
-    res.status(400).json({
+    const status = sessionId ? 401 : 400;
+    const message = sessionId ? 'Invalid session ID' : 'Missing session ID';
+    res.status(status).json({
       jsonrpc: '2.0',
-      error: { code: -32000, message: 'Invalid or missing session ID' },
+      error: { code: -32000, message },
       id: null,
     });
     return;
