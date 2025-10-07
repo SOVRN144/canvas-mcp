@@ -111,10 +111,10 @@ jobs:
             init.json
             session.txt
 
-  smoke-public:
+  public_smoke:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ env.PUBLIC_URL != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.PUBLIC_URL != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -124,10 +124,8 @@ jobs:
       - run: npm ci || npm install
       - name: Public smoke
         env:
-          PUBLIC_URL: ${{ env.PUBLIC_URL }}
-        run: |
-          set -euo pipefail
-          bash scripts/smoke-public.sh "$PUBLIC_URL"
+          PUBLIC_BASE: ${{ inputs.PUBLIC_URL }}
+        run: bash scripts/smoke-public.sh
 
   smoke-canvas:
     runs-on: ubuntu-latest
