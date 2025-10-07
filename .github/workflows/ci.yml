@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
 
+env:
+  PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -104,6 +107,24 @@ jobs:
             server.log
             init.json
             session.txt
+
+  smoke-public:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ env.PUBLIC_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci || npm install
+      - name: Public smoke
+        env:
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          bash scripts/smoke-public.sh "$PUBLIC_URL"
 
   smoke-canvas:
     runs-on: ubuntu-latest

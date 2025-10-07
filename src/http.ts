@@ -20,58 +20,17 @@ const SESSION_TTL_MS = (() => {
   return Number.isFinite(v) && v > 0 ? v : 10 * 60 * 1000;
 })();
 
-// ---- MCP server + echo tool ----
+// ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
 const SERVER_VERSION = process.env.npm_package_version ?? '0.0.0';
-const server = new McpServer({ name: 'sanity-mcp', version: SERVER_VERSION });
-
-const registeredTools: string[] = [];
-const originalRegisterTool = (server as any).registerTool?.bind(server);
-if (typeof originalRegisterTool === 'function') {
-  (server as any).registerTool = (name: string, def: unknown, handler: unknown) => {
-    registeredTools.push(String(name));
-    return originalRegisterTool(name, def, handler);
-  };
-}
 
 const EchoInputShape = {
   text: z.string().describe('text to echo'),
-};
+} as const;
 const EchoInput = z.object(EchoInputShape);
-server.registerTool(
-  'echo',
-  {
-    title: 'Echo',
-    description: 'Returns the text you send',
-    inputSchema: EchoInputShape,
-  },
-  (args) => {
-    const { text } = EchoInput.parse(args);
-    return { content: [{ type: 'text', text }] };
-  }
-);
 
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
-server.registerTool(
-  'env_check',
-  {
-    title: 'Env check',
-    description: 'Reports if Canvas env vars are present (no secrets returned)',
-    inputSchema: EnvCheckInputShape,
-  },
-  (args) => {
-    EnvCheckInput.parse(args ?? {});
-    const summary = {
-      hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
-      hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
-    };
-    return {
-      content: [{ type: 'text', text: JSON.stringify(summary) }],
-      structuredContent: summary,
-    };
-  }
-);
 
 const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL?.trim() || '';
 const CANVAS_TOKEN = process.env.CANVAS_TOKEN?.trim() || '';
@@ -215,162 +174,214 @@ const fetchModules = async (courseId: number, includeItems: boolean): Promise<Ca
   return withItems;
 };
 
-if (hasCanvas && canvasClient) {
-  const ListCoursesInputShape = {} as const;
-  const ListCoursesInput = z.object(ListCoursesInputShape);
-  server.registerTool(
-    'list_courses',
+const ListCoursesInputShape = {} as const;
+const ListCoursesInput = z.object(ListCoursesInputShape);
+
+const ListModulesInputShape = {
+  courseId: z.number(),
+  includeItems: z.boolean().optional(),
+} as const;
+const ListModulesInput = z.object(ListModulesInputShape);
+
+const ListFilesInputShape = {
+  courseId: z.number(),
+} as const;
+const ListFilesInput = z.object(ListFilesInputShape);
+
+const DownloadFileInputShape = {
+  fileId: z.number(),
+} as const;
+const DownloadFileInput = z.object(DownloadFileInputShape);
+
+type RegisterToolArgs = Parameters<McpServer['registerTool']>;
+
+const createServer = () => {
+  const server = new McpServer({ name: 'sanity-mcp', version: SERVER_VERSION });
+  const toolNames: string[] = [];
+
+  const addTool = (...args: RegisterToolArgs) => {
+    const [name] = args;
+    toolNames.push(String(name));
+    server.registerTool(...args);
+  };
+
+  addTool(
+    'echo',
     {
-      title: 'List courses',
-      description: 'Lists active student enrollments',
-      inputSchema: ListCoursesInputShape,
+      title: 'Echo',
+      description: 'Returns the text you send',
+      inputSchema: EchoInputShape,
     },
-    async (args) => {
-      ListCoursesInput.parse(args ?? {});
-      return withCanvasErrors(async () => {
-        const courses = await getAll<{ id: number; name?: string; course_code?: string; short_name?: string }>(
-          '/api/v1/courses',
-          {
-            per_page: 100,
-            'enrollment_type[]': 'student',
-            enrollment_state: 'active',
+    (args) => {
+      const { text } = EchoInput.parse(args);
+      return { content: [{ type: 'text', text }] };
+    }
+  );
+
+  addTool(
+    'env_check',
+    {
+      title: 'Env check',
+      description: 'Reports if Canvas env vars are present (no secrets returned)',
+      inputSchema: EnvCheckInputShape,
+    },
+    (args) => {
+      EnvCheckInput.parse(args ?? {});
+      const summary = {
+        hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
+        hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
+      };
+      return {
+        content: [{ type: 'text', text: JSON.stringify(summary) }],
+        structuredContent: summary,
+      };
+    }
+  );
+
+  if (hasCanvas && canvasClient) {
+    addTool(
+      'list_courses',
+      {
+        title: 'List courses',
+        description: 'Lists active student enrollments',
+        inputSchema: ListCoursesInputShape,
+      },
+      async (args) => {
+        ListCoursesInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const courses = await getAll<{ id: number; name?: string; course_code?: string; short_name?: string }>(
+            '/api/v1/courses',
+            {
+              per_page: 100,
+              'enrollment_type[]': 'student',
+              enrollment_state: 'active',
+            }
+          );
+          const mapped = courses.map((course) => {
+            const id = course.id;
+            const name = course.name || course.course_code || course.short_name || `course-${id}`;
+            return { id, name };
+          });
+          const preview = { count: mapped.length, sample: mapped.slice(0, 5) };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(preview) }],
+            structuredContent: { courses: mapped },
+          };
+        });
+      }
+    );
+
+    addTool(
+      'list_modules',
+      {
+        title: 'List modules',
+        description: 'Lists modules (optionally including items) for a course',
+        inputSchema: ListModulesInputShape,
+      },
+      async (args) => {
+        const { courseId, includeItems = true } = ListModulesInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const modules = await fetchModules(courseId, includeItems);
+          const preview = { count: modules.length, sample: modules.slice(0, 3) };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(preview) }],
+            structuredContent: { modules },
+          };
+        });
+      }
+    );
+
+    addTool(
+      'list_files_from_modules',
+      {
+        title: 'List files from modules',
+        description: 'Lists files reachable via modules for a course',
+        inputSchema: ListFilesInputShape,
+      },
+      async (args) => {
+        const { courseId } = ListFilesInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const modules = await fetchModules(courseId, true);
+          const fileItems = modules
+            .flatMap((module) => (Array.isArray(module.items) ? module.items : []))
+            .filter((item): item is CanvasModuleItem => item?.type === 'File' && typeof item?.content_id === 'number');
+          const files = await Promise.all(
+            fileItems.map((item) =>
+              withCanvasErrors(async () => {
+                const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
+                const file = response.data as {
+                  id: number;
+                  display_name?: string;
+                  filename?: string;
+                  updated_at?: string;
+                  modified_at?: string;
+                  url?: string;
+                  public_url?: string;
+                };
+                const id = file.id;
+                const name = file.display_name || file.filename || `file-${id}`;
+                const updatedAt = file.updated_at ?? file.modified_at ?? null;
+                const url = file.url ?? file.public_url ?? null;
+                return { id, name, updated_at: updatedAt, url };
+              })
+            )
+          );
+          const preview = { count: files.length, sample: files.slice(0, 5) };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(preview) }],
+            structuredContent: { files },
+          };
+        });
+      }
+    );
+
+    addTool(
+      'download_file',
+      {
+        title: 'Download file',
+        description: 'Downloads a file by id to a temporary location',
+        inputSchema: DownloadFileInputShape,
+      },
+      async (args) => {
+        const { fileId } = DownloadFileInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
+          const file = metadataResponse.data as {
+            display_name?: string;
+            filename?: string;
+            url?: string;
+            public_url?: string;
+          };
+          const downloadUrl = file.url ?? file.public_url;
+          if (!downloadUrl) {
+            throw new Error('File does not expose a downloadable URL');
           }
-        );
-        const mapped = courses.map((course) => {
-          const id = course.id;
-          const name = course.name || course.course_code || course.short_name || `course-${id}`;
-          return { id, name };
+          const baseName = file.display_name || file.filename || `file-${fileId}`;
+          const safeBase = sanitizeFilename(baseName);
+          const extension = path.extname(safeBase);
+          const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
+          const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
+          const targetPath = path.join(os.tmpdir(), filename);
+          const downloadResponse = await axios.get<ArrayBuffer>(downloadUrl, {
+            responseType: 'arraybuffer',
+            headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
+          });
+          await fs.writeFile(targetPath, Buffer.from(downloadResponse.data));
+          const payload = { path: targetPath };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(payload) }],
+            structuredContent: payload,
+          };
         });
-        const preview = { count: mapped.length, sample: mapped.slice(0, 5) };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(preview) }],
-          structuredContent: { courses: mapped },
-        };
-      });
-    }
-  );
+      }
+    );
+  }
 
-  const ListModulesInputShape = {
-    courseId: z.number(),
-    includeItems: z.boolean().optional(),
-  } as const;
-  const ListModulesInput = z.object(ListModulesInputShape);
-  server.registerTool(
-    'list_modules',
-    {
-      title: 'List modules',
-      description: 'Lists modules (optionally including items) for a course',
-      inputSchema: ListModulesInputShape,
-    },
-    async (args) => {
-      const { courseId, includeItems = true } = ListModulesInput.parse(args ?? {});
-      return withCanvasErrors(async () => {
-        const modules = await fetchModules(courseId, includeItems);
-        const preview = { count: modules.length, sample: modules.slice(0, 3) };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(preview) }],
-          structuredContent: { modules },
-        };
-      });
-    }
-  );
-
-  const ListFilesInputShape = {
-    courseId: z.number(),
-  } as const;
-  const ListFilesInput = z.object(ListFilesInputShape);
-  server.registerTool(
-    'list_files_from_modules',
-    {
-      title: 'List files from modules',
-      description: 'Lists files reachable via modules for a course',
-      inputSchema: ListFilesInputShape,
-    },
-    async (args) => {
-      const { courseId } = ListFilesInput.parse(args ?? {});
-      return withCanvasErrors(async () => {
-        const modules = await fetchModules(courseId, true);
-        const fileItems = modules
-          .flatMap((module) => (Array.isArray(module.items) ? module.items : []))
-          .filter((item): item is CanvasModuleItem => item?.type === 'File' && typeof item?.content_id === 'number');
-        const files = await Promise.all(
-          fileItems.map((item) =>
-            withCanvasErrors(async () => {
-              const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
-              const file = response.data as {
-                id: number;
-                display_name?: string;
-                filename?: string;
-                updated_at?: string;
-                modified_at?: string;
-                url?: string;
-                public_url?: string;
-              };
-              const id = file.id;
-              const name = file.display_name || file.filename || `file-${id}`;
-              const updatedAt = file.updated_at ?? file.modified_at ?? null;
-              const url = file.url ?? file.public_url ?? null;
-              return { id, name, updated_at: updatedAt, url };
-            })
-          )
-        );
-        const preview = { count: files.length, sample: files.slice(0, 5) };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(preview) }],
-          structuredContent: { files },
-        };
-      });
-    }
-  );
-
-  const DownloadFileInputShape = {
-    fileId: z.number(),
-  } as const;
-  const DownloadFileInput = z.object(DownloadFileInputShape);
-  server.registerTool(
-    'download_file',
-    {
-      title: 'Download file',
-      description: 'Downloads a file by id to a temporary location',
-      inputSchema: DownloadFileInputShape,
-    },
-    async (args) => {
-      const { fileId } = DownloadFileInput.parse(args ?? {});
-      return withCanvasErrors(async () => {
-        const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
-        const file = metadataResponse.data as {
-          display_name?: string;
-          filename?: string;
-          url?: string;
-          public_url?: string;
-        };
-        const downloadUrl = file.url ?? file.public_url;
-        if (!downloadUrl) {
-          throw new Error('File does not expose a downloadable URL');
-        }
-        const baseName = file.display_name || file.filename || `file-${fileId}`;
-        const safeBase = sanitizeFilename(baseName);
-        const extension = path.extname(safeBase);
-        const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
-        const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
-        const targetPath = path.join(os.tmpdir(), filename);
-        const downloadResponse = await axios.get<ArrayBuffer>(downloadUrl, {
-          responseType: 'arraybuffer',
-          headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
-        });
-        await fs.writeFile(targetPath, Buffer.from(downloadResponse.data));
-        const payload = { path: targetPath };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      });
-    }
-  );
-}
+  return { server, toolNames };
+};
 
 // ---- Express wiring ----
-const app = express();
+export const app = express();
 
 const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
   .split(',')
@@ -414,11 +425,18 @@ app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
 });
 
-if (process.env.DEBUG_HTTP === '1') {
-  app.get('/_debug/sessions', (_req, res) => {
-    res.json({ activeSessions: Object.keys(sessions).length });
-  });
-}
+app.get('/_debug/sessions', (_req, res) => {
+  const now = Date.now();
+  const payload = Array.from(sessions.entries()).map(([id, entry]) => ({
+    id,
+    createdAt: new Date(entry.createdAt).toISOString(),
+    lastSeen: new Date(entry.lastSeen).toISOString(),
+    idleMs: now - entry.lastSeen,
+    expiresAt: SESSION_TTL_MS > 0 ? new Date(entry.lastSeen + SESSION_TTL_MS).toISOString() : null,
+    tools: entry.toolNames,
+  }));
+  res.json(payload);
+});
 
 type NodeReq = IncomingMessage;
 type NodeRes = ServerResponse;
@@ -426,11 +444,13 @@ const asNode = (req: Request): NodeReq => req as unknown as NodeReq;
 const asNodeRes = (res: Response): NodeRes => res as unknown as NodeRes;
 
 interface SessionEntry {
+  server: McpServer;
   transport: StreamableHTTPServerTransport;
+  toolNames: string[];
   createdAt: number;
   lastSeen: number;
 }
-const sessions: Record<string, SessionEntry> = Object.create(null);
+const sessions = new Map<string, SessionEntry>();
 
 const isInitialize = (body: unknown) =>
   typeof body === 'object' && body !== null && (body as { method?: unknown }).method === 'initialize';
@@ -463,20 +483,36 @@ const normalizeInitializePayload = (body: unknown): unknown => {
 
 const isSessionExpired = (entry: SessionEntry) => Date.now() - entry.lastSeen > SESSION_TTL_MS;
 
-const closeSession = (sessionId: string, entry: SessionEntry) => {
-  try {
-    entry.transport.close();
-  } catch {
-    // ignore shutdown errors
+const closeSession = (
+  sessionId: string,
+  entry?: SessionEntry,
+  options: { initiatedByTransport?: boolean } = {}
+) => {
+  const target = entry ?? sessions.get(sessionId);
+  if (!target) {
+    return;
   }
-  delete sessions[sessionId];
+
+  sessions.delete(sessionId);
+
+  if (!options.initiatedByTransport) {
+    try {
+      target.transport.close();
+    } catch {
+      // ignore shutdown errors
+    }
+  }
+
+  target.server.close().catch(() => {
+    // ignore close errors
+  });
 };
 
 const getActiveSession = (sessionId: string): SessionEntry | undefined => {
   if (!sessionId) {
     return undefined;
   }
-  const entry = sessions[sessionId];
+  const entry = sessions.get(sessionId);
   if (!entry) {
     return undefined;
   }
@@ -492,7 +528,7 @@ setInterval(() => {
     return;
   }
   const now = Date.now();
-  for (const [sessionId, entry] of Object.entries(sessions)) {
+  for (const [sessionId, entry] of sessions.entries()) {
     if (now - entry.lastSeen > SESSION_TTL_MS) {
       closeSession(sessionId, entry);
     }
@@ -528,26 +564,52 @@ app.post('/mcp', async (req: Request, res: Response) => {
         });
         return;
       }
+      const { server: sessionServer, toolNames } = createServer();
       const preSessionId = randomUUID();
+      let initializedSessionId: string | undefined;
+
       res.setHeader(MCP_SESSION_HEADER, preSessionId);
       const transport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,
         sessionIdGenerator: () => preSessionId,
         onsessioninitialized: (newId) => {
-          sessions[newId] = {
+          const activeId = newId ?? preSessionId;
+          initializedSessionId = activeId;
+          if (!res.headersSent) {
+            res.setHeader(MCP_SESSION_HEADER, activeId);
+          }
+          sessions.set(activeId, {
+            server: sessionServer,
             transport,
+            toolNames: [...toolNames],
             createdAt: Date.now(),
             lastSeen: Date.now(),
-          };
+          });
         },
         onsessionclosed: (closedId) => {
-          delete sessions[closedId];
+          closeSession(closedId, undefined, { initiatedByTransport: true });
         },
       });
 
-      await server.connect(transport);
+      await sessionServer.connect(transport);
       const payload = normalizeInitializePayload(req.body);
-      await transport.handleRequest(asNode(req), asNodeRes(res), payload);
+      try {
+        await transport.handleRequest(asNode(req), asNodeRes(res), payload);
+      } catch (error) {
+        if (initializedSessionId) {
+          closeSession(initializedSessionId);
+        } else {
+          try {
+            transport.close();
+          } catch {
+            // ignore shutdown errors
+          }
+          sessionServer.close().catch(() => {
+            // ignore close errors
+          });
+        }
+        throw error;
+      }
       return;
     }
 
@@ -595,11 +657,7 @@ app.delete('/mcp', async (req: Request, res: Response) => {
     });
     return;
   }
-  try {
-    entry.transport.close();
-  } finally {
-    delete sessions[sessionId];
-  }
+  closeSession(sessionId, entry);
   res.status(204).end();
 });
 
@@ -608,5 +666,6 @@ const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
 if (SHOULD_LISTEN) {
   app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
 } else {
-  console.log(JSON.stringify({ registeredTools }, null, 2));
+  const { toolNames } = createServer();
+  console.log(JSON.stringify({ registeredTools: toolNames }, null, 2));
 }
