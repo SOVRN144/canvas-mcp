@@ -1,10 +1,13 @@
 import 'dotenv/config';
 import cors from 'cors';
-import express, { NextFunction, Request, Response } from 'express';
+import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
 import axios, { AxiosInstance, AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { Transform, type TransformCallback, Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -234,7 +237,7 @@ const ListFilesInput = z.object(ListFilesInputShape);
 const DownloadFileInputShape = {
   fileId: z.number(),
   maxSize: z
-    .number()
+    .coerce.number()
     .int()
     .positive()
     .max(MAX_FILE_SIZE)
@@ -417,8 +420,11 @@ const createServer = () => {
           let baseHost: string | null = null;
           if (CANVAS_BASE_URL) {
             try {
-              baseHost = new URL(CANVAS_BASE_URL).hostname.toLowerCase();
-              allowedHosts.add(baseHost);
+              const baseUrl = new URL(CANVAS_BASE_URL);
+              if (baseUrl.protocol === 'https:') {
+                baseHost = baseUrl.hostname.toLowerCase();
+                allowedHosts.add(baseHost);
+              }
             } catch {
               baseHost = null;
             }
@@ -426,7 +432,11 @@ const createServer = () => {
 
           let initialHost: string;
           try {
-            initialHost = new URL(downloadUrl).hostname.toLowerCase();
+            const initialUrl = new URL(downloadUrl);
+            if (initialUrl.protocol !== 'https:') {
+              throw new Error('Only HTTPS downloads are allowed');
+            }
+            initialHost = initialUrl.hostname.toLowerCase();
             allowedHosts.add(initialHost);
           } catch {
             throw new Error('Download URL is invalid');
@@ -443,7 +453,7 @@ const createServer = () => {
             urlString: string,
             remainingRedirects: number,
             sendAuth: boolean
-          ): Promise<AxiosResponse<ArrayBuffer>> => {
+          ): Promise<AxiosResponse<Readable>> => {
             const currentUrl = new URL(urlString);
             const headers =
               sendAuth && CANVAS_TOKEN
@@ -451,18 +461,19 @@ const createServer = () => {
                 : undefined;
 
             try {
-              const requestConfig: AxiosRequestConfig<ArrayBuffer> = {
-                responseType: 'arraybuffer',
+              const requestConfig: AxiosRequestConfig<unknown> = {
+                responseType: 'stream',
                 maxRedirects: 0,
                 maxContentLength: normalizedMaxSize,
                 maxBodyLength: normalizedMaxSize,
+                timeout: 30_000,
                 validateStatus: (status) => status >= 200 && status < 300,
               };
               if (headers) {
                 requestConfig.headers = headers;
               }
 
-              const response = await axios.get<ArrayBuffer>(currentUrl.toString(), requestConfig);
+              const response = await axios.get<Readable>(currentUrl.toString(), requestConfig);
 
               const contentLengthHeader = response.headers['content-length'];
               if (typeof contentLengthHeader === 'string') {
@@ -489,6 +500,9 @@ const createServer = () => {
                   throw new Error('Redirect response missing Location header');
                 }
                 const nextUrl = new URL(locationHeader, currentUrl);
+                if (nextUrl.protocol !== 'https:') {
+                  throw new Error('Redirected to non-HTTPS URL');
+                }
                 const nextHost = nextUrl.hostname.toLowerCase();
                 if (!allowedHosts.has(nextHost)) {
                   throw new Error(`Redirected to disallowed host: ${nextHost}`);
@@ -506,12 +520,28 @@ const createServer = () => {
             shouldSendAuthForHost(initialHost)
           );
 
-          const fileBuffer = Buffer.from(downloadResponse.data);
-          if (fileBuffer.byteLength > normalizedMaxSize) {
-            throw new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`);
+          const readableStream = downloadResponse.data;
+          let streamedBytes = 0;
+          const sizeGuard = new Transform({
+            transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
+              const projectedSize = streamedBytes + chunk.length;
+              if (projectedSize > normalizedMaxSize) {
+                callback(new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`));
+                return;
+              }
+              streamedBytes = projectedSize;
+              callback(null, chunk);
+            },
+          });
+
+          const writer = createWriteStream(targetPath, { flags: 'w' });
+          try {
+            await pipeline(readableStream, sizeGuard, writer);
+          } catch (error) {
+            await fs.unlink(targetPath).catch(() => undefined);
+            throw error;
           }
 
-          await fs.writeFile(targetPath, fileBuffer);
           const cleanupTimer = setTimeout(() => {
             void fs.unlink(targetPath).catch(() => undefined);
           }, 5 * 60 * 1000);
