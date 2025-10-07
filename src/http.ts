@@ -18,6 +18,8 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_PAGES = 100;
+const MAX_RESULTS = 10_000;
 // Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
 const rawSessionTtl = process.env.SESSION_TTL_MS;
 const SESSION_TTL_MS = (() => {
@@ -74,6 +76,9 @@ const parseCanvasErrors = (data: unknown): string | null => {
 };
 
 const raiseCanvasError = (error: unknown): never => {
+  const timestamp = new Date().toISOString();
+  const safeMessage = 'Canvas request failed; check server logs for details';
+
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
@@ -82,11 +87,50 @@ const raiseCanvasError = (error: unknown): never => {
     const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
       .filter(Boolean)
       .join(': ');
+
+    if (isProduction) {
+      const config = error.config;
+      const baseForLog =
+        config?.baseURL ?? canvasClient?.defaults?.baseURL ?? (CANVAS_BASE_URL || undefined);
+      const rawUrl = config?.url;
+      let resolvedUrl: string | undefined;
+      if (rawUrl) {
+        try {
+          resolvedUrl = baseForLog ? new URL(rawUrl, baseForLog).toString() : rawUrl;
+        } catch {
+          resolvedUrl = rawUrl;
+        }
+      } else if (baseForLog) {
+        resolvedUrl = baseForLog;
+      }
+
+      console.error(`[${timestamp}] Canvas request failed`, {
+        status,
+        statusText,
+        method: config?.method ? config.method.toUpperCase() : 'UNKNOWN',
+        url: resolvedUrl,
+        details: details || fallback,
+      });
+
+      throw new Error(safeMessage);
+    }
+
     throw new Error(description);
   }
+
   if (error instanceof Error) {
+    if (isProduction) {
+      console.error(`[${timestamp}] Canvas error`, error);
+      throw new Error(safeMessage);
+    }
     throw error;
   }
+
+  if (isProduction) {
+    console.error(`[${timestamp}] Canvas unknown error`, error);
+    throw new Error(safeMessage);
+  }
+
   throw new Error(String(error));
 };
 
@@ -119,15 +163,42 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   const results: T[] = [];
   let nextUrl: string | null = url;
   let query = params;
+  let pageCount = 0;
+  const seenPaths = new Set<string>();
+  const resolutionBase = canvasClient.defaults?.baseURL ?? CANVAS_BASE_URL;
+  if (!resolutionBase) {
+    throw new Error('No Canvas base URL configured for pagination.');
+  }
+
   while (nextUrl) {
     try {
-      const response = await canvasClient.get(nextUrl, { params: query });
+      pageCount += 1;
+      if (pageCount > MAX_PAGES) {
+        throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
+      }
+
+      const currentUrl =
+        /^https?:\/\//i.test(nextUrl) ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
+      if (seenPaths.has(normalizedPath)) {
+        throw new Error('Pagination loop detected while fetching Canvas data.');
+      }
+      seenPaths.add(normalizedPath);
+
+      const response =
+        query !== undefined
+          ? await canvasClient.get(currentUrl.toString(), { params: query })
+          : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
         throw new Error(msg);
       }
-      results.push(...(data as T[]));
+      const pageData = data as T[];
+      if (results.length + pageData.length > MAX_RESULTS) {
+        throw new Error(`Pagination exceeded maximum result limit (${MAX_RESULTS}).`);
+      }
+      results.push(...pageData);
       const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
       if (!next) {
         break;
