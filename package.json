@@ -4,11 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "tsx src/http.ts",
     "dev:http": "tsx src/http.ts",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "lint": "echo \"(add eslint later)\""
+    "lint": "echo \"(add eslint later)\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.19.1",

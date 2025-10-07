@@ -13,6 +13,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci || npm install
+      - run: npm run typecheck
       - run: npm run build
 
   smoke:
