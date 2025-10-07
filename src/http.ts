@@ -1,10 +1,13 @@
 import 'dotenv/config';
 import cors from 'cors';
-import express, { NextFunction, Request, Response, type ErrorRequestHandler } from 'express';
-import axios, { AxiosInstance } from 'axios';
+import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
+import axios, { AxiosInstance, AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { Transform, type TransformCallback, Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -14,6 +17,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
 // Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
 const rawSessionTtl = process.env.SESSION_TTL_MS;
 const SESSION_TTL_MS = (() => {
@@ -232,8 +236,14 @@ const ListFilesInput = z.object(ListFilesInputShape);
 
 const DownloadFileInputShape = {
   fileId: z.number(),
+  maxSize: z
+    .coerce.number()
+    .int()
+    .positive()
+    .max(MAX_FILE_SIZE)
+    .optional(),
 } as const;
-const DownloadFileInput = z.object(DownloadFileInputShape);
+const DownloadFileInput = z.object(DownloadFileInputShape).strict();
 
 type RegisterToolArgs = Parameters<McpServer['registerTool']>;
 
@@ -385,7 +395,7 @@ const createServer = () => {
         inputSchema: DownloadFileInputShape,
       },
       async (args) => {
-        const { fileId } = DownloadFileInput.parse(args ?? {});
+        const { fileId, maxSize: requestedMaxSize } = DownloadFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
           const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
           const file = metadataResponse.data as {
@@ -404,11 +414,138 @@ const createServer = () => {
           const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
           const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
           const targetPath = path.join(os.tmpdir(), filename);
-          const downloadResponse = await axios.get<ArrayBuffer>(downloadUrl, {
-            responseType: 'arraybuffer',
-            headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
+          const normalizedMaxSize = Math.min(requestedMaxSize ?? MAX_FILE_SIZE, MAX_FILE_SIZE);
+
+          const allowedHosts = new Set<string>();
+          let baseHost: string | null = null;
+          if (CANVAS_BASE_URL) {
+            try {
+              const baseUrl = new URL(CANVAS_BASE_URL);
+              if (baseUrl.protocol === 'https:') {
+                baseHost = baseUrl.hostname.toLowerCase();
+                allowedHosts.add(baseHost);
+              }
+            } catch {
+              baseHost = null;
+            }
+          }
+
+          let initialHost: string;
+          try {
+            const initialUrl = new URL(downloadUrl);
+            if (initialUrl.protocol !== 'https:') {
+              throw new Error('Only HTTPS downloads are allowed');
+            }
+            initialHost = initialUrl.hostname.toLowerCase();
+            allowedHosts.add(initialHost);
+          } catch {
+            throw new Error('Download URL is invalid');
+          }
+
+          // Known Canvas CDN hostnames can be allowed without forwarding credentials
+          allowedHosts.add('files.instructure.com');
+          allowedHosts.add('canvas-user-content.com');
+
+          const shouldSendAuthForHost = (hostname: string) =>
+            Boolean(CANVAS_TOKEN) && baseHost !== null && hostname === baseHost;
+
+          const fetchBinary = async (
+            urlString: string,
+            remainingRedirects: number,
+            sendAuth: boolean
+          ): Promise<AxiosResponse<Readable>> => {
+            const currentUrl = new URL(urlString);
+            const headers =
+              sendAuth && CANVAS_TOKEN
+                ? AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` })
+                : undefined;
+
+            try {
+              const requestConfig: AxiosRequestConfig<unknown> = {
+                responseType: 'stream',
+                maxRedirects: 0,
+                maxContentLength: normalizedMaxSize,
+                maxBodyLength: normalizedMaxSize,
+                timeout: 30_000,
+                validateStatus: (status) => status >= 200 && status < 300,
+              };
+              if (headers) {
+                requestConfig.headers = headers;
+              }
+
+              const response = await axios.get<Readable>(currentUrl.toString(), requestConfig);
+
+              const contentLengthHeader = response.headers['content-length'];
+              if (typeof contentLengthHeader === 'string') {
+                const length = Number.parseInt(contentLengthHeader, 10);
+                if (Number.isFinite(length) && length > normalizedMaxSize) {
+                  throw new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`);
+                }
+              }
+
+              return response;
+            } catch (error) {
+              if (
+                axios.isAxiosError(error) &&
+                error.response &&
+                error.response.status >= 300 &&
+                error.response.status < 400
+              ) {
+                if (remainingRedirects <= 0) {
+                  throw new Error('Too many redirects while downloading file');
+                }
+                const locationHeader =
+                  error.response.headers?.['location'] ?? error.response.headers?.['Location'];
+                if (!locationHeader) {
+                  throw new Error('Redirect response missing Location header');
+                }
+                const nextUrl = new URL(locationHeader, currentUrl);
+                if (nextUrl.protocol !== 'https:') {
+                  throw new Error('Redirected to non-HTTPS URL');
+                }
+                const nextHost = nextUrl.hostname.toLowerCase();
+                if (!allowedHosts.has(nextHost)) {
+                  throw new Error(`Redirected to disallowed host: ${nextHost}`);
+                }
+                const nextSendAuth = shouldSendAuthForHost(nextHost);
+                return fetchBinary(nextUrl.toString(), remainingRedirects - 1, nextSendAuth);
+              }
+              throw error;
+            }
+          };
+
+          const downloadResponse = await fetchBinary(
+            downloadUrl,
+            3,
+            shouldSendAuthForHost(initialHost)
+          );
+
+          const readableStream = downloadResponse.data;
+          let streamedBytes = 0;
+          const sizeGuard = new Transform({
+            transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
+              const projectedSize = streamedBytes + chunk.length;
+              if (projectedSize > normalizedMaxSize) {
+                callback(new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`));
+                return;
+              }
+              streamedBytes = projectedSize;
+              callback(null, chunk);
+            },
           });
-          await fs.writeFile(targetPath, Buffer.from(downloadResponse.data));
+
+          const writer = createWriteStream(targetPath, { flags: 'w' });
+          try {
+            await pipeline(readableStream, sizeGuard, writer);
+          } catch (error) {
+            await fs.unlink(targetPath).catch(() => undefined);
+            throw error;
+          }
+
+          const cleanupTimer = setTimeout(() => {
+            void fs.unlink(targetPath).catch(() => undefined);
+          }, 5 * 60 * 1000);
+          cleanupTimer.unref();
           const payload = { path: targetPath };
           return {
             content: [{ type: 'text', text: JSON.stringify(payload) }],
