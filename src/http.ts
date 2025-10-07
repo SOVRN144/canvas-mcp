@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import cors from 'cors';
-import express, { NextFunction, Request, Response } from 'express';
+import express, { NextFunction, Request, Response, type ErrorRequestHandler } from 'express';
 import axios, { AxiosInstance } from 'axios';
 import os from 'node:os';
 import path from 'node:path';
@@ -151,6 +151,32 @@ const redactSessionId = (value: string): string => {
     return value;
   }
   return value.length <= 8 ? value : `${value.slice(0, 8)}…`;
+};
+
+const fallbackSessionKey = (req: Request) => ipKeyGenerator(req.ip ?? '');
+
+const jsonParseErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
+  if (err instanceof SyntaxError && typeof (err as { type?: unknown }).type === 'string') {
+    const parseType = (err as { type?: unknown }).type;
+    if (parseType === 'entity.parse.failed') {
+      let id: unknown = null;
+      if (req.body && typeof req.body === 'object') {
+        id = (req.body as Record<string, unknown>).id ?? null;
+      } else if (typeof (err as { body?: unknown }).body === 'string') {
+        try {
+          const parsed = JSON.parse((err as { body?: string }).body ?? '');
+          if (parsed && typeof parsed === 'object') {
+            id = (parsed as Record<string, unknown>).id ?? null;
+          }
+        } catch {
+          // ignore failures to parse invalid JSON bodies
+        }
+      }
+      res.status(400).json(buildJsonRpcError('Invalid JSON', id));
+      return;
+    }
+  }
+  next(err);
 };
 
 type CanvasModuleItem = {
@@ -404,11 +430,19 @@ const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+const trustProxyValue = process.env.TRUST_PROXY;
+if (typeof trustProxyValue === 'string' && trustProxyValue.length > 0) {
+  const normalizedTrustProxy = trustProxyValue === 'true' ? true : trustProxyValue === 'false' ? false : trustProxyValue;
+  app.set('trust proxy', normalizedTrustProxy);
+}
+
 const globalMcpLimiter = rateLimit({
   windowMs: 60_000,
-  max: 100,
-  standardHeaders: true,
+  limit: 100,
+  standardHeaders: 'draft-8',
   legacyHeaders: false,
+  identifier: 'mcp-global',
+  skip: (req) => req.method === 'OPTIONS',
   handler: (_req, res) => {
     res.status(429).json(buildJsonRpcError('Global rate limit exceeded'));
   },
@@ -416,17 +450,17 @@ const globalMcpLimiter = rateLimit({
 
 const toolsCallLimiter = rateLimit({
   windowMs: 60_000,
-  max: 30,
-  standardHeaders: true,
+  limit: 30,
+  standardHeaders: 'draft-8',
   legacyHeaders: false,
+  identifier: 'tools-call',
   keyGenerator: (req) => {
     const rawSessionId = req.header(MCP_SESSION_HEADER);
     const sessionId = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
     if (sessionId && sessionId.trim().length > 0) {
       return sessionId.trim();
     }
-    const ip = req.ip || '';
-    return ipKeyGenerator(ip);
+    return fallbackSessionKey(req);
   },
   skip: (req) => {
     const body = req.body;
@@ -442,8 +476,6 @@ const toolsCallLimiter = rateLimit({
     res.status(429).json(buildJsonRpcError('Session rate limit exceeded', id));
   },
 });
-
-app.use('/mcp', globalMcpLimiter);
 
 const mcpJsonParser = express.json({
   limit: '2mb',
@@ -478,6 +510,10 @@ app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   }
   next(err);
 });
+
+app.use(jsonParseErrorHandler);
+
+app.use('/mcp', globalMcpLimiter);
 
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
@@ -831,6 +867,8 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   closeSession(sessionId, entry);
   res.status(204).end();
 });
+
+app.use(jsonParseErrorHandler);
 
 const PORT = Number(process.env.PORT ?? '8787');
 const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
