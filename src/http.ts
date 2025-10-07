@@ -165,8 +165,10 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   let query = params;
   let pageCount = 0;
   const seenPaths = new Set<string>();
-  const resolutionBase =
-    canvasClient.defaults?.baseURL ?? (CANVAS_BASE_URL || 'https://canvas.pagination/');
+  const resolutionBase = canvasClient.defaults?.baseURL ?? CANVAS_BASE_URL;
+  if (!resolutionBase) {
+    throw new Error('No Canvas base URL configured for pagination.');
+  }
 
   while (nextUrl) {
     try {
@@ -175,14 +177,18 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const currentUrl = new URL(nextUrl, resolutionBase);
+      const currentUrl =
+        /^https?:\/\//i.test(nextUrl) ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
       }
       seenPaths.add(normalizedPath);
 
-      const response = await canvasClient.get(currentUrl.toString(), { params: query });
+      const response =
+        query !== undefined
+          ? await canvasClient.get(currentUrl.toString(), { params: query })
+          : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
