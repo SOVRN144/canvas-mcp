@@ -452,6 +452,8 @@ interface SessionEntry {
 }
 const sessions = new Map<string, SessionEntry>();
 const pendingSessions = new Map<string, Promise<void>>();
+let shuttingDown = false;
+let httpServer: Server | null = null;
 
 const waitForPendingSession = async (sessionId: string): Promise<void> => {
   if (!sessionId) {
@@ -497,7 +499,7 @@ const normalizeInitializePayload = (body: unknown): unknown => {
   return { ...request, params };
 };
 
-const isSessionExpired = (entry: SessionEntry) => Date.now() - entry.lastSeen > SESSION_TTL_MS;
+const isSessionExpired = (entry: SessionEntry) => SESSION_TTL_MS > 0 && Date.now() - entry.lastSeen > SESSION_TTL_MS;
 
 const closeSession = (
   sessionId: string,
@@ -557,9 +559,8 @@ setInterval(() => {
   if (SESSION_TTL_MS <= 0) {
     return;
   }
-  const now = Date.now();
   for (const [sessionId, entry] of sessions.entries()) {
-    if (now - entry.lastSeen > SESSION_TTL_MS) {
+    if (isSessionExpired(entry)) {
       closeSession(sessionId, entry);
     }
   }
@@ -572,6 +573,14 @@ app.post('/mcp', async (req: Request, res: Response) => {
       req.body && typeof req.body === 'object'
         ? (req.body as Record<string, unknown>).id ?? null
         : null;
+    if (shuttingDown) {
+      res.status(503).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Server shutting down' },
+        id: requestId,
+      });
+      return;
+    }
     let existing = getActiveSession(sessionId);
     if (!existing && sessionId) {
       await waitForPendingSession(sessionId);
@@ -695,6 +704,14 @@ app.post('/mcp', async (req: Request, res: Response) => {
 });
 
 app.get('/mcp', async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Server shutting down' },
+      id: null,
+    });
+    return;
+  }
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
   let entry = getActiveSession(sessionId);
   if (!entry) {
@@ -714,6 +731,14 @@ app.get('/mcp', async (req: Request, res: Response) => {
 });
 
 app.delete('/mcp', async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Server shutting down' },
+      id: null,
+    });
+    return;
+  }
   const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
   let entry = getActiveSession(sessionId);
   if (!entry) {
@@ -734,8 +759,6 @@ app.delete('/mcp', async (req: Request, res: Response) => {
 
 const PORT = Number(process.env.PORT ?? '8787');
 const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
-let httpServer: Server | null = null;
-let shuttingDown = false;
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
