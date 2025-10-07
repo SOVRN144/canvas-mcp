@@ -3,9 +3,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-
-env:
-  PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+    inputs:
+      PUBLIC_URL:
+        description: 'Base URL (e.g., https://<ngrok>.ngrok-free.dev)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -187,7 +189,7 @@ jobs:
   public_smoke:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.PUBLIC_URL != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.PUBLIC_URL != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -195,8 +197,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci || npm install
-      - run: sudo apt-get update && sudo apt-get install -y jq
       - name: Public smoke
         env:
-          PUBLIC_BASE: ${{ vars.PUBLIC_URL }}
+          PUBLIC_BASE: ${{ github.event.inputs.PUBLIC_URL }}
         run: bash scripts/smoke-public.sh
