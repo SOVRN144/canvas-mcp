@@ -187,7 +187,7 @@ jobs:
   public_smoke:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ env.PUBLIC_URL != '' }}
+    if: ${{ vars.PUBLIC_URL != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -198,5 +198,5 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq
       - name: Public smoke
         env:
-          PUBLIC_BASE: ${{ env.PUBLIC_URL }}
+          PUBLIC_BASE: ${{ vars.PUBLIC_URL }}
         run: bash scripts/smoke-public.sh
