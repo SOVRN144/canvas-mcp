@@ -2,9 +2,12 @@ name: CI
 on:
   push:
   pull_request:
-
-env:
-  PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+  workflow_dispatch:
+    inputs:
+      PUBLIC_URL:
+        description: 'Base URL (e.g., https://<ngrok>.ngrok-free.dev)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -201,10 +204,18 @@ jobs:
             server.log
             init.json
 
-  smoke_public:
-    if: ${{ vars.PUBLIC_MCP_URL != '' }}
+  public_smoke:
     runs-on: ubuntu-latest
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.PUBLIC_URL != '' }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y jq
-      - run: bash scripts/smoke-public.sh "${{ vars.PUBLIC_MCP_URL }}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci || npm install
+      - name: Public smoke
+        env:
+          PUBLIC_BASE: ${{ inputs.PUBLIC_URL }}
+        run: bash scripts/smoke-public.sh
