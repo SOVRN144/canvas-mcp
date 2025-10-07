@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -19,6 +20,8 @@ const SESSION_TTL_MS = (() => {
   const v = rawSessionTtl ? Number.parseInt(rawSessionTtl, 10) : NaN;
   return Number.isFinite(v) && v > 0 ? v : 10 * 60 * 1000;
 })();
+const isProduction = process.env.NODE_ENV === 'production';
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN?.trim() ?? '';
 
 // ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
@@ -136,6 +139,19 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
 
 const sanitizeFilename = (name: string): string =>
   name.replace(/[\\/:*?"<>|]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'file';
+
+const buildJsonRpcError = (message: string, id: unknown = null) => ({
+  jsonrpc: '2.0',
+  error: { code: -32000, message },
+  id,
+});
+
+const redactSessionId = (value: string): string => {
+  if (!value) {
+    return value;
+  }
+  return value.length <= 8 ? value : `${value.slice(0, 8)}…`;
+};
 
 type CanvasModuleItem = {
   id: number;
@@ -388,11 +404,64 @@ const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+const globalMcpLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json(buildJsonRpcError('Global rate limit exceeded'));
+  },
+});
+
+const toolsCallLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const rawSessionId = req.header(MCP_SESSION_HEADER);
+    const sessionId = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
+    if (sessionId && sessionId.trim().length > 0) {
+      return sessionId.trim();
+    }
+    const ip = req.ip || '';
+    return ipKeyGenerator(ip);
+  },
+  skip: (req) => {
+    const body = req.body;
+    if (typeof body !== 'object' || body === null) {
+      return true;
+    }
+    const method = (body as { method?: unknown }).method;
+    return method !== 'tools/call';
+  },
+  handler: (req, res) => {
+    const id =
+      typeof req.body === 'object' && req.body !== null ? (req.body as Record<string, unknown>).id ?? null : null;
+    res.status(429).json(buildJsonRpcError('Session rate limit exceeded', id));
+  },
+});
+
+app.use('/mcp', globalMcpLimiter);
+
+const mcpJsonParser = express.json({
+  limit: '2mb',
+  type: ['application/json', 'application/*+json', 'text/plain'],
+});
+
 app.use(
   cors((req, callback) => {
     const origin = req.header('Origin');
-    const allow = !origin || allowedOrigins.includes(origin);
-    if (allow) {
+    if (!origin) {
+      callback(null, { origin: false, exposedHeaders: [MCP_SESSION_HEADER] });
+      return;
+    }
+    if (allowedOrigins.length === 0) {
+      callback(new Error('Not allowed by CORS'));
+      return;
+    }
+    if (allowedOrigins.includes(origin)) {
       callback(null, { origin: true, exposedHeaders: [MCP_SESSION_HEADER] });
       return;
     }
@@ -403,38 +472,40 @@ app.use(
 app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (err instanceof Error && err.message === 'Not allowed by CORS') {
     res.status(403).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'CORS origin not allowed' },
-      id: null,
+      ...buildJsonRpcError('Not allowed by CORS'),
     });
     return;
   }
   next(err);
 });
 
-// Parse JSON only on POST /mcp
-app.post(
-  '/mcp',
-  express.json({
-    limit: '2mb',
-    type: ['application/json', 'application/*+json', 'text/plain'],
-  })
-);
-
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/_debug/sessions', (_req, res) => {
+app.get('/_debug/sessions', (req, res) => {
+  if (isProduction) {
+    const token = req.header('X-Debug-Token');
+    if (!DEBUG_TOKEN || token !== DEBUG_TOKEN) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+  }
+
   const now = Date.now();
-  const payload = Array.from(sessions.entries()).map(([id, entry]) => ({
-    id,
-    createdAt: new Date(entry.createdAt).toISOString(),
-    lastSeen: new Date(entry.lastSeen).toISOString(),
-    idleMs: now - entry.lastSeen,
-    expiresAt: SESSION_TTL_MS > 0 ? new Date(entry.lastSeen + SESSION_TTL_MS).toISOString() : null,
-    tools: entry.toolNames,
-  }));
+  const payload = Array.from(sessions.entries()).map(([id, entry]) => {
+    const base = {
+      id: isProduction ? redactSessionId(id) : id,
+      createdAt: new Date(entry.createdAt).toISOString(),
+      lastSeen: new Date(entry.lastSeen).toISOString(),
+      idleMs: now - entry.lastSeen,
+      expiresAt: SESSION_TTL_MS > 0 ? new Date(entry.lastSeen + SESSION_TTL_MS).toISOString() : null,
+    };
+    if (!isProduction) {
+      return { ...base, tools: entry.toolNames };
+    }
+    return base;
+  });
   res.json(payload);
 });
 
@@ -566,7 +637,7 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-app.post('/mcp', async (req: Request, res: Response) => {
+app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Response) => {
   try {
     const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
     const requestId =
