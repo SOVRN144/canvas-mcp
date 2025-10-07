@@ -1,7 +1,13 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
-import axios, { AxiosInstance, AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios';
+import axios, {
+  AxiosInstance,
+  AxiosHeaders,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+  type CreateAxiosDefaults,
+} from 'axios';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -14,18 +20,20 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { config } from './config.js';
+import logger from './logger.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-// Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
-const rawSessionTtl = process.env.SESSION_TTL_MS;
-const SESSION_TTL_MS = (() => {
-  const v = rawSessionTtl ? Number.parseInt(rawSessionTtl, 10) : NaN;
-  return Number.isFinite(v) && v > 0 ? v : 10 * 60 * 1000;
-})();
-const isProduction = process.env.NODE_ENV === 'production';
-const DEBUG_TOKEN = process.env.DEBUG_TOKEN?.trim() ?? '';
+const MAX_PAGES = 100;
+const MAX_RESULTS = 10_000;
+const SESSION_TTL_MS =
+  config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
+    ? config.sessionTtlMs
+    : 10 * 60 * 1000;
+const isProduction = config.nodeEnv === 'production';
+const DEBUG_TOKEN = config.debugToken;
 
 // ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
@@ -39,17 +47,23 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL?.trim() || '';
-const CANVAS_TOKEN = process.env.CANVAS_TOKEN?.trim() || '';
-const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
+const CANVAS_BASE_URL = config.canvasBaseUrl ?? '';
+const CANVAS_TOKEN = config.canvasToken ?? '';
+const hasCanvas = Boolean(config.canvasBaseUrl && config.canvasToken);
 
-const canvasClient: AxiosInstance | null = hasCanvas
-  ? axios.create({
-      baseURL: CANVAS_BASE_URL,
-      headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
-      timeout: 15_000,
-    })
-  : null;
+let canvasClient: AxiosInstance | null = null;
+if (hasCanvas) {
+  const axiosDefaults: CreateAxiosDefaults = {
+    timeout: 15_000,
+  };
+  if (config.canvasBaseUrl) {
+    axiosDefaults.baseURL = config.canvasBaseUrl;
+  }
+  if (CANVAS_TOKEN) {
+    axiosDefaults.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
+  }
+  canvasClient = axios.create(axiosDefaults);
+}
 
 const parseCanvasErrors = (data: unknown): string | null => {
   if (!data || typeof data !== 'object') {
@@ -74,6 +88,9 @@ const parseCanvasErrors = (data: unknown): string | null => {
 };
 
 const raiseCanvasError = (error: unknown): never => {
+  const timestamp = new Date().toISOString();
+  const safeMessage = 'Canvas request failed; check server logs for details';
+
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
@@ -82,11 +99,51 @@ const raiseCanvasError = (error: unknown): never => {
     const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
       .filter(Boolean)
       .join(': ');
+
+    if (isProduction) {
+      const requestConfig = error.config;
+      const baseForLog =
+        requestConfig?.baseURL ?? canvasClient?.defaults?.baseURL ?? config.canvasBaseUrl ?? undefined;
+      const rawUrl = requestConfig?.url;
+      let resolvedUrl: string | undefined;
+      if (rawUrl) {
+        try {
+          resolvedUrl = baseForLog ? new URL(rawUrl, baseForLog).toString() : rawUrl;
+        } catch {
+          resolvedUrl = rawUrl;
+        }
+      } else if (baseForLog) {
+        resolvedUrl = baseForLog;
+      }
+
+      logger.error('Canvas request failed', {
+        timestamp,
+        status,
+        statusText,
+        method: requestConfig?.method ? requestConfig.method.toUpperCase() : 'UNKNOWN',
+        url: resolvedUrl,
+        details: details || fallback,
+      });
+
+      throw new Error(safeMessage);
+    }
+
     throw new Error(description);
   }
+
   if (error instanceof Error) {
+    if (isProduction) {
+      logger.error('Canvas error', { timestamp, error: error.stack ?? error.message });
+      throw new Error(safeMessage);
+    }
     throw error;
   }
+
+  if (isProduction) {
+    logger.error('Canvas unknown error', { timestamp, error });
+    throw new Error(safeMessage);
+  }
+
   throw new Error(String(error));
 };
 
@@ -119,15 +176,42 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   const results: T[] = [];
   let nextUrl: string | null = url;
   let query = params;
+  let pageCount = 0;
+  const seenPaths = new Set<string>();
+  const resolutionBase = canvasClient.defaults?.baseURL ?? config.canvasBaseUrl;
+  if (!resolutionBase) {
+    throw new Error('No Canvas base URL configured for pagination.');
+  }
+
   while (nextUrl) {
     try {
-      const response = await canvasClient.get(nextUrl, { params: query });
+      pageCount += 1;
+      if (pageCount > MAX_PAGES) {
+        throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
+      }
+
+      const currentUrl =
+        /^https?:\/\//i.test(nextUrl) ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
+      if (seenPaths.has(normalizedPath)) {
+        throw new Error('Pagination loop detected while fetching Canvas data.');
+      }
+      seenPaths.add(normalizedPath);
+
+      const response =
+        query !== undefined
+          ? await canvasClient.get(currentUrl.toString(), { params: query })
+          : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
         throw new Error(msg);
       }
-      results.push(...(data as T[]));
+      const pageData = data as T[];
+      if (results.length + pageData.length > MAX_RESULTS) {
+        throw new Error(`Pagination exceeded maximum result limit (${MAX_RESULTS}).`);
+      }
+      results.push(...pageData);
       const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
       if (!next) {
         break;
@@ -280,8 +364,8 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
-        hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
+        hasCanvasBaseUrl: Boolean(config.canvasBaseUrl),
+        hasCanvasToken: Boolean(config.canvasToken),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
@@ -562,10 +646,7 @@ const createServer = () => {
 // ---- Express wiring ----
 export const app = express();
 
-const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const allowedOrigins = config.corsAllowOrigins;
 
 const trustProxyValue = process.env.TRUST_PROXY;
 if (typeof trustProxyValue === 'string' && trustProxyValue.length > 0) {
@@ -1005,8 +1086,8 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-const PORT = Number(process.env.PORT ?? '8787');
-const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
+const PORT = config.port;
+const SHOULD_LISTEN = !config.disableHttpListen;
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
@@ -1034,9 +1115,9 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   }
   sessions.clear();
   if (signal === 'SIGINT') {
-    console.log('Received SIGINT, shut down gracefully.');
+    logger.info('Received SIGINT, shut down gracefully.');
   } else if (signal === 'SIGTERM') {
-    console.log('Received SIGTERM, shut down gracefully.');
+    logger.info('Received SIGTERM, shut down gracefully.');
   }
 };
 
@@ -1047,8 +1128,10 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
 });
 
 if (SHOULD_LISTEN) {
-  httpServer = app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+  httpServer = app.listen(PORT, '127.0.0.1', () =>
+    logger.info('SANITY MCP server listening', { url: `http://127.0.0.1:${PORT}/mcp` })
+  );
 } else {
   const { toolNames } = createServer();
-  console.log(JSON.stringify({ registeredTools: toolNames }, null, 2));
+  logger.info('Registered tools (listen disabled)', { toolNames });
 }
