@@ -48,10 +48,10 @@ if jq -e '.result.tools | map(.name=="list_courses") | any' <<<"${LIST}" >/dev/n
     -H 'Content-Type: application/json' \
     -H "Mcp-Session-Id: ${SESSION}" \
     --data '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_courses","arguments":{}}}')"
-  if jq -e '.result.structuredContent.courses' <<<"${LIST_COURSES}" >/dev/null 2>&1; then
+  if jq -e '.result.structuredContent.courses | type == "array"' <<<"${LIST_COURSES}" >/dev/null 2>&1; then
     echo "${LIST_COURSES}" | jq '{count: (.result.structuredContent.courses | length), sample: (.result.structuredContent.courses | map({id, name})[:3])}'
   else
-    echo "::notice::list_courses unavailable (Canvas 5xx or shape mismatch) — continuing"
+    echo "::notice::list_courses unavailable (Canvas 5xx or shape mismatch); continuing"
   fi
   echo
 fi
