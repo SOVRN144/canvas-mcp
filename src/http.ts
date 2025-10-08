@@ -24,16 +24,21 @@ import logger from './logger.js';
 import { config } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
-// Early boot safety net for startup failures
-process.on('uncaughtException', (err) => {
-  // use existing logger
-  logger.error('uncaughtException during server startup', { error: String(err), stack: (err as any)?.stack ?? null });
-  process.exit(1);
-});
-process.on('unhandledRejection', (reason: unknown) => {
-  logger.error('unhandledRejection during server startup', { reason: String(reason) });
-  process.exit(1);
-});
+// Early boot safety net for startup failures (only in production/main execution)
+if (require.main === module || config.nodeEnv === 'production') {
+  process.on('uncaughtException', (err) => {
+    logger.error('uncaughtException during server startup', {
+      error: String(err),
+      stack: (err as any)?.stack ?? null,
+    });
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error('unhandledRejection during server startup', { reason: String(reason) });
+    process.exit(1);
+  });
+}
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -542,19 +547,20 @@ const createServer = () => {
         return withCanvasErrors(async () => {
           const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
           
-          // Create preview text (first ~2k chars)
-          const previewText = result.blocks
-            .map(block => block.text)
-            .join('\n\n')
-            .substring(0, 2000);
-          
+          // Build a single preview string from blocks (first ~2k chars shown)
+          const fullText = result.blocks.map(b => b.text).join('\n\n');
+          const previewText = fullText.length > 2000
+            ? fullText.substring(0, 2000).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+            : fullText;
+
           const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
-          
+
           return {
             content: [
-              { type: 'text', text: `${summary}\n\n${previewText}${previewText.length < result.charCount ? '\n\n[...]' : ''}` }
+              // Don't append an extra "[...]"—the ellipsis + structured truncated flag are enough
+              { type: 'text', text: `${summary}\n\n${previewText}` },
             ],
-            structuredContent: result,
+            structuredContent: result, // still includes result.truncated
           };
         });
       }
@@ -1085,7 +1091,7 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
 });
 
 // If we're running as the main module (node dist/http.js), start the HTTP server
-if (require.main === module || !config.disableHttpListen) {
+if (require.main === module && !config.disableHttpListen) {
   try {
     httpServer = app.listen(PORT, HOST, () => {
       // Single-line log the CI can show when tailing server.log
