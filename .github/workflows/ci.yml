@@ -53,15 +53,20 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8787/mcp >/dev/null 2>&1; then
+            if curl -fsS -X POST http://127.0.0.1:8787/mcp \
+              -H 'Accept: application/json, text/event-stream' \
+              -H 'Content-Type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+              >/dev/null 2>&1
+            then
               echo "Server is ready"
               exit 0
             fi
             sleep 1
           done
-          echo "Server did not become ready in time"
-          echo "---- server.log (tail) ----"
-          tail -n 200 server.log || true
+          echo "::error::Server did not become ready in time"
+          echo "---- server.log (last 200 lines) ----"
+          [ -f server.log ] && tail -n 200 server.log || true
           exit 1
 
       - name: Install CLI deps
