@@ -436,17 +436,19 @@ const createServer = () => {
             }
 
             if (axios.isAxiosError(primaryError)) {
-              const status = primaryError.response?.status;
-              const statusText = primaryError.response?.statusText;
+              const status = primaryError.response?.status ?? null;
+              const statusText = primaryError.response?.statusText ?? null;
               const details =
                 parseCanvasErrors(primaryError.response?.data) ??
                 (typeof primaryError.message === 'string' ? primaryError.message : 'Canvas request failed');
               logCanvasErrorEvent({
-                status: status ?? null,
-                statusText: statusText ?? null,
+                status,
+                statusText,
                 details,
                 ...(primaryError.config?.url ? { url: primaryError.config.url } : {}),
               });
+            } else if (primaryError instanceof Error) {
+              logCanvasErrorEvent({ status: null, statusText: null, details: primaryError.message });
             }
 
             courses = await fetchCourses({ per_page: 50 });
