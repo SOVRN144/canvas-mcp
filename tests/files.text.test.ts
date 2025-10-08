@@ -157,4 +157,37 @@ describe('files/extract plain text', () => {
     const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
     expect(preview).toContain('UTF-8 encoding');
   });
+
+  it('handles undefined content-type header with extension-based detection', async () => {
+    const textContent = 'This is a plain text file detected by .txt extension.';
+    
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 444,
+            display_name: 'readme.txt',
+            filename: 'readme.txt',
+            size: textContent.length,
+            content_type: 'text/plain', // Canvas metadata has type
+            url: 'https://files.canvas.example/readme',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from(textContent),
+        headers: {}, // No content-type header - will fall back to extension
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 444 });
+
+    expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain'); // From extension
+    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+    
+    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    expect(preview).toContain('detected by .txt extension');
+  });
 });

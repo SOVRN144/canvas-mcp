@@ -124,6 +124,11 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
   }
 }
 
+function normalizeMime(input?: string): string {
+  if (!input) return '';
+  return input.split(';', 1)[0].trim().toLowerCase();
+}
+
 function normalizeWhitespace(text: string): string {
   return text
     .replace(/\s+/g, ' ')
@@ -276,19 +281,21 @@ export async function extractFileContent(
   const responseType = contentType; // header
   const extensionType = getMimeTypeFromExtension(name);
 
-  // Normalize MIME (strip params, lowercase)
-  let normalizedResponseType = '';
-  if (responseType && responseType !== 'application/octet-stream') {
-    normalizedResponseType = responseType.split(';')[0].trim().toLowerCase();
-  }
-  
-  const normalizedExtensionType = extensionType.split(';')[0].trim().toLowerCase();
-  
+  // responseType is the HTTP header (may include params), extensionType from filename.
+  // If responseType is present but is 'application/octet-stream', treat it as empty.
+  const normalizedResponseType =
+    (responseType && responseType !== 'application/octet-stream')
+      ? normalizeMime(responseType)
+      : '';
+
+  const normalizedExtensionType = normalizeMime(extensionType);
+
+  // Prefer header (when specific), else extension; both are now safe strings.
   const finalContentType = normalizedResponseType || normalizedExtensionType;
   
   // Check against strict allow-list
   if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
-    throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType})`);
+    throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType || 'unknown'})`);
   }
   
   let blocks: FileContentBlock[] = [];
