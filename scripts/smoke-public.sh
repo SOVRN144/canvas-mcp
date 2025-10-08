@@ -41,6 +41,21 @@ echo "${LIST}" | jq .
 echo "${LIST}" | jq -e '(.result.tools | map(.name) | index("echo")) != null' >/dev/null
 echo
 
+if jq -e '.result.tools | map(.name=="list_courses") | any' <<<"${LIST}" >/dev/null 2>&1; then
+  echo "### tools/call list_courses"
+  LIST_COURSES="$(curl -s "${PUBLIC_BASE%/}/mcp" \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'Content-Type: application/json' \
+    -H "Mcp-Session-Id: ${SESSION}" \
+    --data '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_courses","arguments":{}}}')"
+  if jq -e '.result.structuredContent.courses' <<<"${LIST_COURSES}" >/dev/null 2>&1; then
+    echo "${LIST_COURSES}" | jq '{count: (.result.structuredContent.courses | length), sample: (.result.structuredContent.courses | map({id, name})[:3])}'
+  else
+    echo "NOTICE: list_courses failed (Canvas may be unavailable). Other tools OK."
+  fi
+  echo
+fi
+
 echo "### tools/call echo (ok)"
 SUCCESS="$(curl -s "${PUBLIC_BASE%/}/mcp" \
   -H 'Accept: application/json, text/event-stream' \
