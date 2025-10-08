@@ -18,6 +18,8 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_PAGES = 100;
+const MAX_RESULTS = 10_000;
 // Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
 const rawSessionTtl = process.env.SESSION_TTL_MS;
 const SESSION_TTL_MS = (() => {
@@ -119,15 +121,41 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   const results: T[] = [];
   let nextUrl: string | null = url;
   let query = params;
+  let pageCount = 0;
+  const seenPaths = new Set<string>();
+  const resolutionBase = canvasClient.defaults?.baseURL ?? CANVAS_BASE_URL;
+  if (!resolutionBase) {
+    throw new Error('No Canvas base URL configured for pagination.');
+  }
+
   while (nextUrl) {
     try {
-      const response = await canvasClient.get(nextUrl, { params: query });
+      pageCount += 1;
+      if (pageCount > MAX_PAGES) {
+        throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
+      }
+
+      const currentUrl = new URL(nextUrl, resolutionBase);
+      const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
+      if (seenPaths.has(normalizedPath)) {
+        throw new Error('Pagination loop detected while fetching Canvas data.');
+      }
+      seenPaths.add(normalizedPath);
+
+      const response =
+        query !== undefined
+          ? await canvasClient.get(currentUrl.toString(), { params: query })
+          : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
         throw new Error(msg);
       }
-      results.push(...(data as T[]));
+      const pageData = data as T[];
+      if (results.length + pageData.length > MAX_RESULTS) {
+        throw new Error(`Pagination exceeded maximum result limit (${MAX_RESULTS}).`);
+      }
+      results.push(...pageData);
       const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
       if (!next) {
         break;
