@@ -24,6 +24,17 @@ import logger from './logger.js';
 import { config } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
+// Early boot safety net for startup failures
+process.on('uncaughtException', (err) => {
+  // use existing logger
+  logger.error('uncaughtException during server startup', { error: String(err), stack: (err as any)?.stack ?? null });
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason: unknown) => {
+  logger.error('unhandledRejection during server startup', { reason: String(reason) });
+  process.exit(1);
+});
+
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -1075,10 +1086,15 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
 
 // If we're running as the main module (node dist/http.js), start the HTTP server
 if (require.main === module || !config.disableHttpListen) {
-  httpServer = app.listen(PORT, HOST, () => {
-    // Single-line log the CI can show when tailing server.log
-    logger.info(`MCP server listening`, { host: HOST, port: PORT, path: '/mcp' });
-  });
+  try {
+    httpServer = app.listen(PORT, HOST, () => {
+      // Single-line log the CI can show when tailing server.log
+      logger.info(`MCP server listening`, { host: HOST, port: PORT, path: '/mcp' });
+    });
+  } catch (e) {
+    logger.error('Failed to start HTTP server', { error: String(e) });
+    process.exit(1);
+  }
 } else {
   const { toolNames } = createServer();
   logger.info('Registered tools (listen disabled)', { toolNames });

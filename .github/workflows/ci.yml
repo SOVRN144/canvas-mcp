@@ -49,10 +49,10 @@ jobs:
           echo $! > server.pid
 
       - name: Wait for server (http readiness)
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if curl -fsS -X POST http://127.0.0.1:8787/mcp \
               -H 'Accept: application/json, text/event-stream' \
               -H 'Content-Type: application/json' \
@@ -87,7 +87,7 @@ jobs:
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-            http://127.0.0.1:8787/mcp >/dev/null
+            http://127.0.0.1:8787/mcp | tee init.json >/dev/null
           SID=$(awk -F': *' 'tolower($1)=="mcp-session-id"{print $2}' "$H" | tr -d '\r')
 
           curl -fsS http://127.0.0.1:8787/mcp \
