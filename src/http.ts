@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
+import { isMain } from './util/isMain.js';
 import axios, {
   AxiosInstance,
   AxiosHeaders,
@@ -24,8 +25,10 @@ import logger from './logger.js';
 import { config } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
-// Early boot safety net for startup failures (only in production/main execution)
-if (require.main === module || config.nodeEnv === 'production') {
+const IS_MAIN = isMain(import.meta.url);
+
+// Process-level error handlers for fail-fast behavior (only in production/main execution)
+if (IS_MAIN || config.nodeEnv === 'production') {
   process.on('uncaughtException', (err) => {
     logger.error('uncaughtException during server startup', {
       error: String(err),
@@ -1048,8 +1051,15 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-// Defaults that work in CI
-const PORT = Number(process.env.PORT ?? config.port ?? 8787);
+// General fallback defaults (these also work in CI)
+const PORT = (() => {
+  const raw = process.env.PORT ?? config.port ?? 8787;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 1 || num > 65535) {
+    throw new Error(`Invalid PORT: ${raw}`);
+  }
+  return num;
+})();
 const HOST = process.env.HOST ?? '127.0.0.1';
 
 const stopHttpServer = async (): Promise<void> => {
@@ -1090,8 +1100,8 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   });
 });
 
-// If we're running as the main module (node dist/http.js), start the HTTP server
-if (require.main === module && !config.disableHttpListen) {
+// Only start HTTP listener when executed as main AND not explicitly disabled.
+if (IS_MAIN && !config.disableHttpListen) {
   try {
     httpServer = app.listen(PORT, HOST, () => {
       // Single-line log the CI can show when tailing server.log

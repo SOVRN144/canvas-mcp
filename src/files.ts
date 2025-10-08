@@ -147,14 +147,19 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
   return { text: truncated, truncated: true };
 }
 
+/**
+ * Extracts text from PDF files using dynamic ESM import.
+ * Expects pdf-parse to provide a default export (modern ESM builds).
+ */
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
     const pdfParseModule: any = await import('pdf-parse');
-    const pdfParseFn: (buf: Buffer) => Promise<{ text: string }> =
-      (pdfParseModule?.default ??
-       pdfParseModule?.pdfParse ??
-       pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
+    const pdfParseFn: (buf: Buffer) => Promise<{ text: string }> = pdfParseModule?.default;
+    if (!pdfParseFn) {
+      // Explicit & actionable error; helps if a future package version changes exports.
+      throw new Error('pdf-parse: missing default export; please verify pdf-parse installation and version.');
+    }
 
     const data = await pdfParseFn(buffer);
     return normalizeWhitespace(data.text);
