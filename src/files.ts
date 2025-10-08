@@ -147,24 +147,14 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
   return { text: truncated, truncated: true };
 }
 
-/**
- * Extract text from a PDF buffer using pdf-parse.
- * Uses dynamic import to support both CJS/ESM builds at runtime.
- */
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
-    // Dynamically import to avoid ESM/CJS interop problems in CI/runtime.
+    // Dynamic ESM import to work in CI/runtime (no top-level require)
     const pdfParseModule: any = await import('pdf-parse');
-
-    // Normalize possible export shapes:
-    // - default export is a function
-    // - named export `pdfParse`
-    // - module itself callable (older CJS)
-    const pdfParseFn:
-      | ((buf: Buffer) => Promise<{ text: string }>)
-      = pdfParseModule.default
-        ?? pdfParseModule.pdfParse
-        ?? pdfParseModule;
+    const pdfParseFn: (buf: Buffer) => Promise<{ text: string }> =
+      (pdfParseModule?.default ??
+       pdfParseModule?.pdfParse ??
+       pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
 
     const data = await pdfParseFn(buffer);
     return normalizeWhitespace(data.text);

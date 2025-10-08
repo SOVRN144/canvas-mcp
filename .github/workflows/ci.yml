@@ -63,21 +63,7 @@ jobs:
           echo "---- server.log (tail) ----"
           tail -n 200 server.log || true
           exit 1
-               --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-               http://127.0.0.1:8787/mcp | jq . > init.json
-          awk -F': *' 'tolower($1)=="mcp-session-id" {print $2}' "$H" | tr -d '\r' > session.txt
-          test -s session.txt
 
-      - name: Smoke test (tools/list → echo)
-        run: |
-          set -euo pipefail
-          SESSION=$(cat session.txt)
-          LIST=$(curl -sS http://127.0.0.1:8787/mcp \
-            -H 'Accept: application/json, text/event-stream' \
-            -H 'Content-Type: application/json' \
-            -H "Mcp-Session-Id: $SESSION" \
-            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-          echo "$LIST" | jq .
       - name: Install CLI deps
         run: |
           sudo apt-get update
@@ -87,35 +73,30 @@ jobs:
         run: |
           npm test
 
-      - name: Smoke test (tools/list → echo)
+      # Minimal smoke: initialize → tools/list → echo
+      - name: Smoke test (initialize → tools/list → echo)
         run: |
           set -euo pipefail
-          # Initialize and capture session
           H=$(mktemp)
-          curl -sD "$H" -H 'Accept: application/json, text/event-stream' \
-               -H 'Content-Type: application/json' \
-               --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-               http://127.0.0.1:8787/mcp | jq . > init.json
-          SESSION=$(awk -F': *' 'tolower($1)=="mcp-session-id" {print $2}' "$H" | tr -d '\r')
-          test -n "$SESSION"
-          
-          # Test tools/list
-          LIST=$(curl -sS http://127.0.0.1:8787/mcp \
+          curl -fsS -D "$H" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
-            -H "Mcp-Session-Id: $SESSION" \
-            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-          echo "$LIST" | jq .
-          echo "$LIST" | jq -e '.result.tools | map(.name=="echo") | any'
-          
-          # Test echo tool
-          ECHO=$(curl -sS http://127.0.0.1:8787/mcp \
-            -H 'Accept: application/json, text/event-stream' \
-            -H 'Content-Type: application/json' \
-            -H "Mcp-Session-Id: $SESSION" \
-            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}')
-          echo "$ECHO" | jq -e '.result.content[0].text == "hi"'
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+            http://127.0.0.1:8787/mcp >/dev/null
+          SID=$(awk -F': *' 'tolower($1)=="mcp-session-id"{print $2}' "$H" | tr -d '\r')
 
+          curl -fsS http://127.0.0.1:8787/mcp \
+            -H "Mcp-Session-Id: $SID" \
+            -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq . >/dev/null
+
+          curl -fsS http://127.0.0.1:8787/mcp \
+            -H "Mcp-Session-Id: $SID" \
+            -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"ci ping"}}}' \
+            | jq -r '.result.content[0].text' | grep -q '^ci ping$'
+
+      # Always stop server (fix duplicate `fi`, kill correct process)
       - name: Stop server
         if: always()
         run: |
@@ -124,8 +105,8 @@ jobs:
             kill "$(cat server.pid)" || true
             rm -f server.pid
           fi
-          fi
-          pkill -f "tsx src/http.ts" || true
+          pkill -f "node dist/http.js" || true
+          [ -f server.log ] && tail -n +200 server.log || true
 
       - name: Upload logs
         if: always()
