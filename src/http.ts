@@ -365,8 +365,8 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(config.canvasBaseUrl),
-        hasCanvasToken: Boolean(config.canvasToken),
+        hasCanvasBaseUrl: Boolean(CANVAS_BASE_URL),
+        hasCanvasToken: Boolean(CANVAS_TOKEN),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
