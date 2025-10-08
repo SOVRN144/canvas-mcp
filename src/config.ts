@@ -50,6 +50,7 @@ const ConfigSchema = z
     DISABLE_HTTP_LISTEN: z.enum(['0', '1']).default('0'),
     DEBUG_TOKEN: z.string().optional(),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+    LOG_FORMAT: z.enum(['json', 'pretty']).default('json'),
   })
   .passthrough();
 
@@ -66,12 +67,13 @@ export const config = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   sessionTtlMs: env.SESSION_TTL_MS,
-  corsAllowOrigins: env.CORS_ALLOW_ORIGINS ?? [],
+  corsAllowOrigins: env.CORS_ALLOW_ORIGINS,
   canvasBaseUrl: env.CANVAS_BASE_URL,
   canvasToken: env.CANVAS_TOKEN,
   disableHttpListen: env.DISABLE_HTTP_LISTEN === '1',
   debugToken: env.DEBUG_TOKEN,
   logLevel: env.LOG_LEVEL,
+  logFormat: env.LOG_FORMAT,
 };
 
 export type AppConfig = typeof config;
