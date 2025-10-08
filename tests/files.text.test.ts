@@ -124,4 +124,37 @@ describe('files/extract plain text', () => {
     const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
     expect(preview).toContain('Name,Age,City');
   });
+
+  it('handles content-type with charset parameter', async () => {
+    const textContent = 'This is plain text content with UTF-8 encoding.';
+    
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 333,
+            display_name: 'utf8.txt',
+            filename: 'utf8.txt',
+            size: textContent.length,
+            content_type: 'text/plain',
+            url: 'https://files.canvas.example/utf8',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from(textContent),
+        headers: { 'content-type': 'text/plain; charset=utf-8' }, // With charset parameter
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 333 });
+
+    expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain'); // Normalized (no charset)
+    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+    
+    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    expect(preview).toContain('UTF-8 encoding');
+  });
 });

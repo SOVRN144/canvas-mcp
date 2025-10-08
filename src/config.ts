@@ -77,3 +77,7 @@ export const config = {
 };
 
 export type AppConfig = typeof config;
+
+export function getSanitizedCanvasToken(): string | undefined {
+  return (config.canvasToken ?? '').trim() || undefined;
+}

@@ -1,11 +1,12 @@
 import axios, { AxiosInstance } from 'axios';
 import logger from './logger.js';
-import pdfParse from 'pdf-parse';
+// @ts-ignore - pdf-parse has inconsistent export types
+const pdfParse = require('pdf-parse');
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
-import { config } from './config.js';
+import { getSanitizedCanvasToken } from './config.js';
 
-const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
+const CANVAS_TOKEN = getSanitizedCanvasToken();
 const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
 const TRUNCATE_SUFFIX = '\n\n[…]';
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
@@ -161,8 +162,9 @@ async function extractDocxText(buffer: Buffer, fileId: number): Promise<string> 
 
 /**
  * Extracts basic text from PPTX slides.
- * Note: This is a lightweight extractor; it may miss bullets, tables, notes,
- * or complex formatting. For richer results, use mode='outline' or a dedicated parser.
+ * Note: This is a lightweight extractor using basic regex on XML; it may miss bullets, tables, notes,
+ * or complex formatting. A full XML parser could improve coverage but adds complexity.
+ * For richer results, use mode='outline' or a dedicated parser.
  */
 async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileContentBlock[]> {
   try {
@@ -179,7 +181,11 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     }
     
     for (const slideFile of slideFiles.sort()) {
-      const slideXml = await zip.files[slideFile].async('text');
+      const file = zip.files[slideFile];
+      if (!file) {
+        throw new Error(`File ${fileId}: slide not found (${slideFile})`);
+      }
+      const slideXml = await file.async('text');
       
       // Extract title and content from slide XML
       const titleMatch = slideXml.match(/<a:t[^>]*>([^<]+)<\/a:t>/);
@@ -270,10 +276,15 @@ export async function extractFileContent(
   const responseType = contentType; // header
   const extensionType = getMimeTypeFromExtension(name);
 
-  const finalContentType =
-    (responseType && responseType !== 'application/octet-stream')
-      ? responseType
-      : extensionType;
+  // Normalize MIME (strip params, lowercase)
+  let normalizedResponseType = '';
+  if (responseType && responseType !== 'application/octet-stream') {
+    normalizedResponseType = responseType.split(';')[0].trim().toLowerCase();
+  }
+  
+  const normalizedExtensionType = extensionType.split(';')[0].trim().toLowerCase();
+  
+  const finalContentType = normalizedResponseType || normalizedExtensionType;
   
   // Check against strict allow-list
   if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
