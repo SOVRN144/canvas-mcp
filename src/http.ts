@@ -67,6 +67,22 @@ const canvasClient: AxiosInstance | null = (() => {
   return axios.create(options);
 })();
 
+const logCanvasErrorEvent = (details: {
+  status?: number | null;
+  statusText?: string | null;
+  details: string;
+  url?: string;
+  timestamp?: string;
+}) => {
+  console.error('[Canvas Error]', {
+    timestamp: details.timestamp ?? new Date().toISOString(),
+    status: details.status ?? null,
+    statusText: details.statusText ?? null,
+    details: details.details,
+    url: details.url ?? null,
+  });
+};
+
 const parseCanvasErrors = (data: unknown): string | null => {
   if (!data || typeof data !== 'object') {
     return null;
@@ -102,6 +118,14 @@ const raiseCanvasError = (error: unknown): never => {
       .filter(Boolean)
       .join(': ');
 
+    logCanvasErrorEvent({
+      status: status ?? null,
+      statusText: statusText ?? null,
+      details: details || fallback,
+      ...(error.config?.url ? { url: error.config.url } : {}),
+      timestamp,
+    });
+
     if (isProduction) {
       const requestConfig = error.config;
       const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
@@ -117,15 +141,6 @@ const raiseCanvasError = (error: unknown): never => {
         resolvedUrl = baseForLog;
       }
 
-      logger.error('Canvas request failed', {
-        timestamp,
-        status,
-        statusText,
-        method: requestConfig?.method ? requestConfig.method.toUpperCase() : 'UNKNOWN',
-        url: resolvedUrl,
-        details: details || fallback,
-      });
-
       throw new Error(safeMessage);
     }
 
@@ -133,15 +148,15 @@ const raiseCanvasError = (error: unknown): never => {
   }
 
   if (error instanceof Error) {
+    logCanvasErrorEvent({ status: null, statusText: null, details: error.message, timestamp });
     if (isProduction) {
-      logger.error('Canvas error', { timestamp, error: error.stack ?? error.message });
       throw new Error(safeMessage);
     }
     throw error;
   }
 
   if (isProduction) {
-    logger.error('Canvas unknown error', { timestamp, error });
+    logCanvasErrorEvent({ status: null, statusText: null, details: String(error), timestamp });
     throw new Error(safeMessage);
   }
 
@@ -191,18 +206,17 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const isAbsoluteUrl = /^https?:\/\//i.test(nextUrl);
-      const currentUrl = isAbsoluteUrl ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const isAbsolute = /^https?:\/\//i.test(nextUrl);
+      const currentUrl = isAbsolute ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
       }
       seenPaths.add(normalizedPath);
 
-      const response =
-        query !== undefined
-          ? await canvasClient.get(currentUrl.toString(), { params: query })
-          : await canvasClient.get(currentUrl.toString());
+      const response = query !== undefined
+        ? await canvasClient.get(currentUrl.toString(), { params: query })
+        : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
@@ -386,14 +400,58 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          const courses = await getAll<{ id: number; name?: string; course_code?: string; short_name?: string }>(
-            '/api/v1/courses',
-            {
-              per_page: 100,
-              'enrollment_type[]': 'student',
-              enrollment_state: 'active',
+          const ensureCanvasClient = () => {
+            if (!canvasClient) {
+              throw new Error('Canvas client not configured');
             }
-          );
+            return canvasClient;
+          };
+
+          type CanvasCourse = { id: number; name?: string; course_code?: string; short_name?: string };
+          const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
+            const client = ensureCanvasClient();
+            const response = await client.get('/api/v1/courses', { params });
+            const data = response.data as unknown;
+            if (!Array.isArray(data)) {
+              throw new Error('Unexpected Canvas response for /api/v1/courses');
+            }
+            return data as CanvasCourse[];
+          };
+
+          const primaryParams = {
+            per_page: 50,
+            'enrollment_type[]': 'student',
+          } satisfies Record<string, unknown>;
+
+          let courses: CanvasCourse[];
+          try {
+            courses = await fetchCourses(primaryParams);
+          } catch (primaryError) {
+            const isRecoverable =
+              (axios.isAxiosError(primaryError) && (primaryError.response?.status ?? 0) >= 500) ||
+              (primaryError instanceof Error && /Unexpected Canvas response/i.test(primaryError.message));
+
+            if (!isRecoverable) {
+              throw primaryError;
+            }
+
+            if (axios.isAxiosError(primaryError)) {
+              const status = primaryError.response?.status;
+              const statusText = primaryError.response?.statusText;
+              const details =
+                parseCanvasErrors(primaryError.response?.data) ??
+                (typeof primaryError.message === 'string' ? primaryError.message : 'Canvas request failed');
+              logCanvasErrorEvent({
+                status: status ?? null,
+                statusText: statusText ?? null,
+                details,
+                ...(primaryError.config?.url ? { url: primaryError.config.url } : {}),
+              });
+            }
+
+            courses = await fetchCourses({ per_page: 50 });
+          }
+
           const mapped = courses.map((course) => {
             const id = course.id;
             const name = course.name || course.course_code || course.short_name || `course-${id}`;

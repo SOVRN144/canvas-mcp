@@ -62,6 +62,22 @@ const ci = (msg: string) => console.log(msg);
   if (!listOk) pass = false;
   console.log({ status: list.status, tools: tools.map((t: any) => t?.name) });
 
+  if (tools.some((tool: any) => tool?.name === 'list_courses')) {
+    ci('### tools/call list_courses');
+    const listCourses = await request(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .set('Content-Type', 'application/json')
+      .set('Mcp-Session-Id', sessionId)
+      .send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
+    const courses = listCourses.body?.result?.structuredContent?.courses;
+    if (Array.isArray(courses)) {
+      console.log({ status: listCourses.status, count: courses.length, sample: courses.slice(0, 3) });
+    } else {
+      console.log('::notice::list_courses unavailable (Canvas 5xx or shape mismatch) — continuing');
+    }
+  }
+
   ci('### tools/call echo (ok)');
   const echo = await request(app)
     .post('/mcp')
