@@ -147,4 +147,47 @@ describe('files/extract PPTX', () => {
     expect(body?.result?.structuredContent?.file?.contentType).toContain('presentationml');
     expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
   });
+
+  it('rejects PPTX with too many slides', async () => {
+    // Create a mock with over 500 slides
+    const mockZipWithManySlides = {
+      files: {},
+      loadAsync: vi.fn()
+    };
+    
+    // Generate 501 slide files
+    for (let i = 1; i <= 501; i++) {
+      mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = mockZipFile;
+    }
+    
+    // Mock JSZip to return the zip with many slides
+    const JSZip = await import('jszip');
+    vi.mocked(JSZip.default.loadAsync).mockResolvedValueOnce(mockZipWithManySlides as any);
+
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 999,
+            display_name: 'HugePresentation.pptx',
+            filename: 'HugePresentation.pptx',
+            size: 10240,
+            content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files.canvas.example/huge',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from('fake-huge-pptx'),
+        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 999 });
+
+    expect(body?.error).toBeTruthy();
+    expect(body.error.message).toMatch(/File 999: PPTX file has too many slides \(501 > 500\)/);
+  });
 });

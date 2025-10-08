@@ -8,6 +8,7 @@ import { config } from './config.js';
 const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
 const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
 const TRUNCATE_SUFFIX = '\n\n[…]';
+const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
 const ALLOWED_MIME_TYPES = new Set<string>([
   'application/pdf',
@@ -118,7 +119,7 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       url: fileMeta.url,
       error: String(error) 
     });
-    throw new Error(`Failed to download file: ${fileMeta.display_name}`);
+    throw new Error(`File ${fileMeta.id}: failed to download file (${String(error)})`);
   }
 }
 
@@ -138,23 +139,23 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
   return { text: truncated, truncated: true };
 }
 
-async function extractPdfText(buffer: Buffer): Promise<string> {
+async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     const data = await pdfParse(buffer);
     return normalizeWhitespace(data.text);
   } catch (error) {
-    logger.error('Failed to extract PDF text', { error: String(error) });
-    throw new Error('Failed to extract text from PDF file');
+    logger.error('Failed to extract PDF text', { fileId, error: String(error) });
+    throw new Error(`File ${fileId}: failed to extract text from PDF file`);
   }
 }
 
-async function extractDocxText(buffer: Buffer): Promise<string> {
+async function extractDocxText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     const result = await mammoth.extractRawText({ buffer });
     return normalizeWhitespace(result.value);
   } catch (error) {
-    logger.error('Failed to extract DOCX text', { error: String(error) });
-    throw new Error('Failed to extract text from DOCX file');
+    logger.error('Failed to extract DOCX text', { fileId, error: String(error) });
+    throw new Error(`File ${fileId}: failed to extract text from DOCX file`);
   }
 }
 
@@ -163,7 +164,7 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
  * Note: This is a lightweight extractor; it may miss bullets, tables, notes,
  * or complex formatting. For richer results, use mode='outline' or a dedicated parser.
  */
-async function extractPptxText(buffer: Buffer): Promise<FileContentBlock[]> {
+async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileContentBlock[]> {
   try {
     const zip = await JSZip.loadAsync(buffer);
     const blocks: FileContentBlock[] = [];
@@ -172,6 +173,10 @@ async function extractPptxText(buffer: Buffer): Promise<FileContentBlock[]> {
     const slideFiles = Object.keys(zip.files).filter(name => 
       name.startsWith('ppt/slides/slide') && name.endsWith('.xml')
     );
+    
+    if (slideFiles.length > MAX_PPTX_SLIDES) {
+      throw new Error(`File ${fileId}: PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
+    }
     
     for (const slideFile of slideFiles.sort()) {
       const slideXml = await zip.files[slideFile].async('text');
@@ -206,8 +211,8 @@ async function extractPptxText(buffer: Buffer): Promise<FileContentBlock[]> {
     
     return blocks;
   } catch (error) {
-    logger.error('Failed to extract PPTX text', { error: String(error) });
-    throw new Error('Failed to extract text from PPTX file');
+    logger.error('Failed to extract PPTX text', { fileId, error: String(error) });
+    throw new Error(`File ${fileId}: failed to extract text from PPTX file`);
   }
 }
 
@@ -220,7 +225,9 @@ function textToBlocks(text: string): FileContentBlock[] {
 }
 
 function getMimeTypeFromExtension(filename: string): string {
-  const ext = filename.toLowerCase().split('.').pop();
+  const parts = filename.toLowerCase().split('.');
+  const ext = parts.length > 1 ? parts.pop()! : '';
+  if (!ext) return 'application/octet-stream';
   switch (ext) {
     case 'pdf': return 'application/pdf';
     case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -259,15 +266,17 @@ export async function extractFileContent(
   // Download file content
   const { buffer, contentType, name, size } = await downloadCanvasFile(fileMeta);
   
-  // Determine content type with fallback to extension
-  const responseContentType = contentType !== 'application/octet-stream' ? contentType : '';
-  const finalContentType = responseContentType || getMimeTypeFromExtension(name);
+  // Determine content type with explicit detection order
+  const responseType = contentType; // header
+  const extensionType = getMimeTypeFromExtension(name);
+
+  const finalContentType =
+    (responseType && responseType !== 'application/octet-stream')
+      ? responseType
+      : extensionType;
   
-  // Check against allow-list
-  const isTextType = finalContentType.startsWith('text/');
-  const isAllowedType = ALLOWED_MIME_TYPES.has(finalContentType);
-  
-  if (!isTextType && !isAllowedType) {
+  // Check against strict allow-list
+  if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
     throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType})`);
   }
   
@@ -276,17 +285,17 @@ export async function extractFileContent(
   
   // Extract content based on type
   if (finalContentType.includes('pdf')) {
-    extractedText = await extractPdfText(buffer);
+    extractedText = await extractPdfText(buffer, fileMeta.id);
     blocks = textToBlocks(extractedText);
   } else if (finalContentType.includes('wordprocessingml.document')) {
-    extractedText = await extractDocxText(buffer);
+    extractedText = await extractDocxText(buffer, fileMeta.id);
     blocks = textToBlocks(extractedText);
   } else if (finalContentType.includes('presentationml.presentation')) {
-    blocks = await extractPptxText(buffer);
+    blocks = await extractPptxText(buffer, fileMeta.id);
     extractedText = blocks.map(b => b.text).join('\n\n');
-  } else if (finalContentType.startsWith('text/') || 
-             finalContentType.includes('csv') || 
-             finalContentType.includes('markdown')) {
+  } else if (finalContentType === 'text/plain' || 
+             finalContentType === 'text/csv' || 
+             finalContentType === 'text/markdown') {
     extractedText = normalizeWhitespace(buffer.toString('utf-8'));
     blocks = textToBlocks(extractedText);
   }

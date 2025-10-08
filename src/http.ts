@@ -560,8 +560,8 @@ const createServer = () => {
     addTool(
       'download_file',
       {
-        title: 'Download file',
-        description: 'Downloads a file by id to a temporary location',
+        title: 'Download Canvas file as attachment',
+        description: 'Download a Canvas file by id and return a base64 attachment (with optional size cap)',
         inputSchema: DownloadFileInputShape,
       },
       async (args) => {
@@ -575,146 +575,6 @@ const createServer = () => {
           return {
             content: [{ type: 'text', text: attachmentText }],
             structuredContent: result,
-          };
-        });
-      }
-    );
-  }
-
-  return { server, toolNames };
-};
-          if (CANVAS_BASE_URL) {
-            try {
-              const baseUrl = new URL(CANVAS_BASE_URL);
-              if (baseUrl.protocol === 'https:') {
-                baseHost = baseUrl.hostname.toLowerCase();
-                allowedHosts.add(baseHost);
-              }
-            } catch {
-              baseHost = null;
-            }
-          }
-
-          let initialHost: string;
-          try {
-            const initialUrl = new URL(downloadUrl);
-            if (initialUrl.protocol !== 'https:') {
-              throw new Error('Only HTTPS downloads are allowed');
-            }
-            initialHost = initialUrl.hostname.toLowerCase();
-            allowedHosts.add(initialHost);
-          } catch {
-            throw new Error('Download URL is invalid');
-          }
-
-          // Known Canvas CDN hostnames can be allowed without forwarding credentials
-          allowedHosts.add('files.instructure.com');
-          allowedHosts.add('canvas-user-content.com');
-
-          const shouldSendAuthForHost = (hostname: string) =>
-            Boolean(config.canvasToken) && baseHost !== null && hostname === baseHost;
-
-          const fetchBinary = async (
-            urlString: string,
-            remainingRedirects: number,
-            sendAuth: boolean
-          ): Promise<AxiosResponse<Readable>> => {
-            const currentUrl = new URL(urlString);
-            const headers =
-              sendAuth && config.canvasToken
-                ? AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` })
-                : undefined;
-
-            try {
-              const requestConfig: AxiosRequestConfig<unknown> = {
-                responseType: 'stream',
-                maxRedirects: 0,
-                maxContentLength: normalizedMaxSize,
-                maxBodyLength: normalizedMaxSize,
-                timeout: 30_000,
-                validateStatus: (status) => status >= 200 && status < 300,
-              };
-              if (headers) {
-                requestConfig.headers = headers;
-              }
-
-              const response = await axios.get<Readable>(currentUrl.toString(), requestConfig);
-
-              const contentLengthHeader = response.headers['content-length'];
-              if (typeof contentLengthHeader === 'string') {
-                const length = Number.parseInt(contentLengthHeader, 10);
-                if (Number.isFinite(length) && length > normalizedMaxSize) {
-                  throw new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`);
-                }
-              }
-
-              return response;
-            } catch (error) {
-              if (
-                axios.isAxiosError(error) &&
-                error.response &&
-                error.response.status >= 300 &&
-                error.response.status < 400
-              ) {
-                if (remainingRedirects <= 0) {
-                  throw new Error('Too many redirects while downloading file');
-                }
-                const locationHeader =
-                  error.response.headers?.['location'] ?? error.response.headers?.['Location'];
-                if (!locationHeader) {
-                  throw new Error('Redirect response missing Location header');
-                }
-                const nextUrl = new URL(locationHeader, currentUrl);
-                if (nextUrl.protocol !== 'https:') {
-                  throw new Error('Redirected to non-HTTPS URL');
-                }
-                const nextHost = nextUrl.hostname.toLowerCase();
-                if (!allowedHosts.has(nextHost)) {
-                  throw new Error(`Redirected to disallowed host: ${nextHost}`);
-                }
-                const nextSendAuth = shouldSendAuthForHost(nextHost);
-                return fetchBinary(nextUrl.toString(), remainingRedirects - 1, nextSendAuth);
-              }
-              throw error;
-            }
-          };
-
-          const downloadResponse = await fetchBinary(
-            downloadUrl,
-            3,
-            shouldSendAuthForHost(initialHost)
-          );
-
-          const readableStream = downloadResponse.data;
-          let streamedBytes = 0;
-          const sizeGuard = new Transform({
-            transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
-              const projectedSize = streamedBytes + chunk.length;
-              if (projectedSize > normalizedMaxSize) {
-                callback(new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`));
-                return;
-              }
-              streamedBytes = projectedSize;
-              callback(null, chunk);
-            },
-          });
-
-          const writer = createWriteStream(targetPath, { flags: 'w' });
-          try {
-            await pipeline(readableStream, sizeGuard, writer);
-          } catch (error) {
-            await fs.unlink(targetPath).catch(() => undefined);
-            throw error;
-          }
-
-          const cleanupTimer = setTimeout(() => {
-            void fs.unlink(targetPath).catch(() => undefined);
-          }, 5 * 60 * 1000);
-          cleanupTimer.unref();
-          const payload = { path: targetPath };
-          return {
-            content: [{ type: 'text', text: JSON.stringify(payload) }],
-            structuredContent: payload,
           };
         });
       }
