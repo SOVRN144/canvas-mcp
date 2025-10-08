@@ -61,8 +61,8 @@ const canvasClient: AxiosInstance | null = (() => {
   if (CANVAS_BASE_URL) {
     options.baseURL = CANVAS_BASE_URL;
   }
-  if (config.canvasToken) {
-    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
+  if (CANVAS_TOKEN) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
   }
   return axios.create(options);
 })();
