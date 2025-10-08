@@ -1,0 +1,150 @@
+import { describe, it, beforeAll, expect, vi } from 'vitest';
+import request from 'supertest';
+
+// Set env before importing
+process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
+process.env.CANVAS_TOKEN = 'x';
+process.env.DISABLE_HTTP_LISTEN = '1';
+
+// Mock axios
+const get = vi.fn();
+const create = vi.fn(() => ({ get }));
+const AxiosHeaders = { from: (_: any) => ({}) };
+vi.mock('axios', () => ({
+  default: { create, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  AxiosHeaders,
+}));
+
+// Mock JSZip for PPTX extraction
+const mockZipFile = {
+  async: vi.fn()
+};
+
+const mockZip = {
+  files: {
+    'ppt/slides/slide1.xml': mockZipFile,
+    'ppt/slides/slide2.xml': mockZipFile,
+  },
+  loadAsync: vi.fn()
+};
+
+vi.mock('jszip', () => ({
+  default: class MockJSZip {
+    static loadAsync = vi.fn().mockResolvedValue(mockZip);
+    files = mockZip.files;
+  }
+}));
+
+let app: any;
+
+async function initSession() {
+  const res = await request(app)
+    .post('/mcp')
+    .set('Accept', 'application/json, text/event-stream')
+    .set('Content-Type', 'application/json')
+    .send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2024-11-05' },
+    });
+  return res.headers['mcp-session-id'];
+}
+
+async function callTool(sid: string, name: string, args: any) {
+  const res = await request(app)
+    .post('/mcp')
+    .set('Mcp-Session-Id', sid)
+    .set('Accept', 'application/json, text/event-stream')
+    .set('Content-Type', 'application/json')
+    .send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name, arguments: args ?? {} },
+    });
+  expect(res.status).toBe(200);
+  return res.body;
+}
+
+describe('files/extract PPTX', () => {
+  beforeAll(async () => {
+    const mod = await import('../src/http');
+    app = (mod as any).app ?? (mod as any).default ?? mod;
+  });
+
+  it('extracts slide text from PPTX and returns structured blocks', async () => {
+    // Setup mocks
+    mockZipFile.async.mockImplementation((format: string) => {
+      if (format === 'text') {
+        return Promise.resolve('<a:t>Introduction Slide</a:t><a:t>Welcome to the course</a:t><a:t>Key concepts overview</a:t>');
+      }
+      return Promise.resolve('');
+    });
+
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 321,
+            display_name: 'Presentation.pptx',
+            filename: 'Presentation.pptx',
+            size: 5120,
+            content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files.canvas.example/pptx',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from('fake-pptx-binary'),
+        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 321, mode: 'slides' });
+
+    expect(body?.result?.structuredContent).toBeTruthy();
+    const sc = body.result.structuredContent;
+
+    expect(sc.file.id).toBe(321);
+    expect(sc.file.name).toBe('Presentation.pptx');
+    expect(sc.charCount).toBeGreaterThan(0);
+    expect(Array.isArray(sc.blocks)).toBe(true);
+    expect(sc.blocks.length).toBeGreaterThan(0);
+    
+    // Should have slide structure
+    expect(sc.blocks.some((b: any) => b.type === 'heading' && b.text.includes('Slide'))).toBe(true);
+  });
+
+  it('handles PPTX with octet-stream content type via extension fallback', async () => {
+    mockZipFile.async.mockResolvedValue('<a:t>Fallback Detection</a:t>');
+
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 654,
+            display_name: 'Slides.pptx',
+            filename: 'Slides.pptx',
+            size: 3072,
+            content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files.canvas.example/slides',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from('fake-pptx-data'),
+        headers: { 'content-type': 'application/octet-stream' }, // Generic type
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 654 });
+
+    expect(body?.result?.structuredContent?.file?.contentType).toContain('presentationml');
+    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+  });
+});

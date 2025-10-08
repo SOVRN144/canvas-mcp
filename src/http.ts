@@ -510,6 +510,15 @@ const createServer = () => {
       }
     );
 
+    /**
+     * Extract text from Canvas file tool
+     * Downloads and extracts readable text from Canvas files (PDF/DOCX/PPTX/TXT)
+     * @param fileId Canvas file ID to extract from
+     * @param mode Extraction mode (text, outline, slides)
+     * @param maxChars Maximum characters to return
+     * @returns Structured content with text blocks and metadata
+     * @throws If file is too large, unsupported type, or Canvas API fails
+     */
     addTool(
       'extract_file',
       {
@@ -540,6 +549,14 @@ const createServer = () => {
       }
     );
 
+    /**
+     * Download Canvas file as attachment tool
+     * Downloads Canvas files as base64 attachments with size limits
+     * @param fileId Canvas file ID to download
+     * @param maxSize Maximum file size in bytes
+     * @returns Base64-encoded file data for chat attachment
+     * @throws If file exceeds size limit or download fails
+     */
     addTool(
       'download_file',
       {
@@ -563,7 +580,9 @@ const createServer = () => {
       }
     );
   }
-          let baseHost: string | null = null;
+
+  return { server, toolNames };
+};
           if (CANVAS_BASE_URL) {
             try {
               const baseUrl = new URL(CANVAS_BASE_URL);

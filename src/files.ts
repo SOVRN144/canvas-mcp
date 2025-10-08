@@ -7,6 +7,16 @@ import { config } from './config.js';
 
 const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
 const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
+const TRUNCATE_SUFFIX = '\n\n[…]';
+
+const ALLOWED_MIME_TYPES = new Set<string>([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation', // pptx
+  'text/plain',
+  'text/csv',
+  'text/markdown',
+]);
 
 type CanvasFile = {
   id: number;
@@ -45,16 +55,29 @@ type DownloadResult = {
   };
 };
 
+/**
+ * Downloads and returns Canvas file metadata.
+ * @param canvasClient The configured Canvas API client
+ * @param fileId The Canvas file ID to retrieve
+ * @returns Canvas file metadata including id, name, size, content_type, and download url
+ * @throws If the Canvas API request fails or returns invalid data
+ */
 export async function getCanvasFileMeta(canvasClient: AxiosInstance, fileId: number): Promise<CanvasFile> {
   try {
     const response = await canvasClient.get(`/api/v1/files/${fileId}`);
     return response.data;
   } catch (error) {
     logger.error('Failed to get Canvas file metadata', { fileId, error: String(error) });
-    throw new Error(`Failed to get file metadata for file ${fileId}`);
+    throw new Error(`File ${fileId}: failed to retrieve metadata from Canvas API`);
   }
 }
 
+/**
+ * Downloads a Canvas file and returns a Buffer + metadata.
+ * @param fileMeta The Canvas file metadata (id, size, url)
+ * @returns The binary buffer and resolved content type.
+ * @throws If the request fails, times out, or size limits are exceeded.
+ */
 export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer: Buffer; contentType: string; name: string; size: number }> {
   try {
     // Create axios instance for file download with Canvas token auth
@@ -72,6 +95,16 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
 
     const buffer = Buffer.from(response.data);
     const contentType = response.headers['content-type'] || fileMeta.content_type || 'application/octet-stream';
+    
+    // Validate downloaded size and warn on mismatch
+    const tolerance = 1024; // 1KB
+    if (typeof fileMeta.size === 'number' && Math.abs(buffer.length - fileMeta.size) > tolerance) {
+      logger.warn('Downloaded file size mismatch', {
+        fileId: fileMeta.id,
+        expected: fileMeta.size,
+        actual: buffer.length,
+      });
+    }
     
     return {
       buffer,
@@ -101,7 +134,7 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
     return { text, truncated: false };
   }
   
-  const truncated = text.substring(0, maxChars - 10) + '\n\n[…]';
+  const truncated = text.substring(0, maxChars - TRUNCATE_SUFFIX.length) + TRUNCATE_SUFFIX;
   return { text: truncated, truncated: true };
 }
 
@@ -125,6 +158,11 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
   }
 }
 
+/**
+ * Extracts basic text from PPTX slides.
+ * Note: This is a lightweight extractor; it may miss bullets, tables, notes,
+ * or complex formatting. For richer results, use mode='outline' or a dedicated parser.
+ */
 async function extractPptxText(buffer: Buffer): Promise<FileContentBlock[]> {
   try {
     const zip = await JSZip.loadAsync(buffer);
@@ -194,6 +232,15 @@ function getMimeTypeFromExtension(filename: string): string {
   }
 }
 
+/**
+ * Extracts text content from a Canvas file.
+ * @param canvasClient The configured Canvas API client
+ * @param fileId The Canvas file ID to extract from
+ * @param mode The extraction mode (text, outline, slides)
+ * @param maxChars Maximum characters to return (default 50,000)
+ * @returns Structured extraction result with file info, blocks, and metadata
+ * @throws If file is too large, unsupported content type, or extraction fails
+ */
 export async function extractFileContent(
   canvasClient: AxiosInstance,
   fileId: number,
@@ -206,14 +253,23 @@ export async function extractFileContent(
   // Check size limit for extraction
   const maxBytes = MAX_EXTRACT_MB * 1024 * 1024;
   if (fileMeta.size > maxBytes) {
-    throw new Error(`File too large for extraction (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${MAX_EXTRACT_MB}MB). Try download_file instead.`);
+    throw new Error(`File ${fileMeta.id}: too large for extraction (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${MAX_EXTRACT_MB}MB limit). Use download_file instead.`);
   }
   
   // Download file content
   const { buffer, contentType, name, size } = await downloadCanvasFile(fileMeta);
   
   // Determine content type with fallback to extension
-  const finalContentType = contentType || getMimeTypeFromExtension(name);
+  const responseContentType = contentType !== 'application/octet-stream' ? contentType : '';
+  const finalContentType = responseContentType || getMimeTypeFromExtension(name);
+  
+  // Check against allow-list
+  const isTextType = finalContentType.startsWith('text/');
+  const isAllowedType = ALLOWED_MIME_TYPES.has(finalContentType);
+  
+  if (!isTextType && !isAllowedType) {
+    throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType})`);
+  }
   
   let blocks: FileContentBlock[] = [];
   let extractedText = '';
@@ -233,10 +289,6 @@ export async function extractFileContent(
              finalContentType.includes('markdown')) {
     extractedText = normalizeWhitespace(buffer.toString('utf-8'));
     blocks = textToBlocks(extractedText);
-  } else {
-    // Unsupported content type
-    const supportedTypes = ['PDF', 'DOCX', 'PPTX', 'TXT', 'CSV', 'MD'];
-    throw new Error(`Unsupported file type: ${finalContentType}. Supported types: ${supportedTypes.join(', ')}. Try download_file instead for other file types.`);
   }
   
   // Apply character limit
@@ -248,11 +300,11 @@ export async function extractFileContent(
     let currentLength = 0;
     
     for (const block of blocks) {
-      if (currentLength + block.text.length + 10 <= maxChars) {
+      if (currentLength + block.text.length + TRUNCATE_SUFFIX.length <= maxChars) {
         limitedBlocks.push(block);
         currentLength += block.text.length;
       } else {
-        const remainingChars = maxChars - currentLength - 10;
+        const remainingChars = maxChars - currentLength - TRUNCATE_SUFFIX.length;
         if (remainingChars > 0) {
           limitedBlocks.push({
             ...block,
@@ -279,6 +331,14 @@ export async function extractFileContent(
   };
 }
 
+/**
+ * Downloads a Canvas file and returns it as base64 for attachment.
+ * @param canvasClient The configured Canvas API client
+ * @param fileId The Canvas file ID to download
+ * @param maxSize Maximum file size in bytes (default 8MB)
+ * @returns File metadata with base64-encoded data
+ * @throws If file exceeds size limit or download fails
+ */
 export async function downloadFileAsBase64(
   canvasClient: AxiosInstance,
   fileId: number,
@@ -289,7 +349,7 @@ export async function downloadFileAsBase64(
   
   // Check size limit
   if (fileMeta.size > maxSize) {
-    throw new Error(`File too large to attach (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${Math.round(maxSize / 1024 / 1024)}MB). Try extract_file instead.`);
+    throw new Error(`File ${fileMeta.id}: too large to attach (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${Math.round(maxSize / 1024 / 1024)}MB). Try extract_file instead.`);
   }
   
   // Download file content
