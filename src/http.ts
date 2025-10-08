@@ -14,20 +14,19 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { config } from './config.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
-// Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
-const rawSessionTtl = process.env.SESSION_TTL_MS;
-const SESSION_TTL_MS = (() => {
-  const v = rawSessionTtl ? Number.parseInt(rawSessionTtl, 10) : NaN;
-  return Number.isFinite(v) && v > 0 ? v : 10 * 60 * 1000;
-})();
-const isProduction = process.env.NODE_ENV === 'production';
-const DEBUG_TOKEN = process.env.DEBUG_TOKEN?.trim() ?? '';
+const SESSION_TTL_MS =
+  config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
+    ? config.sessionTtlMs
+    : 10 * 60 * 1000;
+const isProduction = config.nodeEnv === 'production';
+const DEBUG_TOKEN = config.debugToken ?? '';
 
 // ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
@@ -308,8 +307,8 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
-        hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
+        hasCanvasBaseUrl: Boolean(config.canvasBaseUrl),
+        hasCanvasToken: Boolean(config.canvasToken),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
@@ -590,10 +589,7 @@ const createServer = () => {
 // ---- Express wiring ----
 export const app = express();
 
-const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const allowedOrigins = config.corsAllowOrigins;
 
 const trustProxyValue = process.env.TRUST_PROXY;
 if (typeof trustProxyValue === 'string' && trustProxyValue.length > 0) {
@@ -1033,8 +1029,8 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-const PORT = Number(process.env.PORT ?? '8787');
-const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
+const PORT = config.port;
+const SHOULD_LISTEN = !config.disableHttpListen;
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
