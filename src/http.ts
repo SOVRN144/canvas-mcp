@@ -1,7 +1,13 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
-import axios, { AxiosInstance, AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios';
+import axios, {
+  AxiosInstance,
+  AxiosHeaders,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+  type CreateAxiosDefaults,
+} from 'axios';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -173,7 +179,7 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   let query = params;
   let pageCount = 0;
   const seenPaths = new Set<string>();
-  const resolutionBase = canvasClient.defaults?.baseURL ?? CANVAS_BASE_URL;
+  const resolutionBase = canvasClient.defaults?.baseURL ?? config.canvasBaseUrl;
   if (!resolutionBase) {
     throw new Error('No Canvas base URL configured for pagination.');
   }
