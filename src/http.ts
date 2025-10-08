@@ -22,6 +22,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
 import { config } from './config.js';
+import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -340,6 +341,13 @@ const ListFilesInputShape = {
 } as const;
 const ListFilesInput = z.object(ListFilesInputShape);
 
+const ExtractFileInputShape = {
+  fileId: z.number(),
+  mode: z.enum(['text', 'outline', 'slides']).optional(),
+  maxChars: z.number().int().positive().max(100_000).optional(),
+} as const;
+const ExtractFileInput = z.object(ExtractFileInputShape);
+
 const DownloadFileInputShape = {
   fileId: z.number(),
   maxSize: z
@@ -503,6 +511,36 @@ const createServer = () => {
     );
 
     addTool(
+      'extract_file',
+      {
+        title: 'Extract text from Canvas file',
+        description: 'Download and extract text from a Canvas file (PDF/DOCX/PPTX/TXT)',
+        inputSchema: ExtractFileInputShape,
+      },
+      async (args) => {
+        const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+          
+          // Create preview text (first ~2k chars)
+          const previewText = result.blocks
+            .map(block => block.text)
+            .join('\n\n')
+            .substring(0, 2000);
+          
+          const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
+          
+          return {
+            content: [
+              { type: 'text', text: `${summary}\n\n${previewText}${previewText.length < result.charCount ? '\n\n[...]' : ''}` }
+            ],
+            structuredContent: result,
+          };
+        });
+      }
+    );
+
+    addTool(
       'download_file',
       {
         title: 'Download file',
@@ -510,28 +548,21 @@ const createServer = () => {
         inputSchema: DownloadFileInputShape,
       },
       async (args) => {
-        const { fileId, maxSize: requestedMaxSize } = DownloadFileInput.parse(args ?? {});
+        const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
-          const file = metadataResponse.data as {
-            display_name?: string;
-            filename?: string;
-            url?: string;
-            public_url?: string;
+          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+          
+          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
+          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+          
+          return {
+            content: [{ type: 'text', text: attachmentText }],
+            structuredContent: result,
           };
-          const downloadUrl = file.url ?? file.public_url;
-          if (!downloadUrl) {
-            throw new Error('File does not expose a downloadable URL');
-          }
-          const baseName = file.display_name || file.filename || `file-${fileId}`;
-          const safeBase = sanitizeFilename(baseName);
-          const extension = path.extname(safeBase);
-          const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
-          const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
-          const targetPath = path.join(os.tmpdir(), filename);
-          const normalizedMaxSize = Math.min(requestedMaxSize ?? MAX_FILE_SIZE, MAX_FILE_SIZE);
-
-          const allowedHosts = new Set<string>();
+        });
+      }
+    );
+  }
           let baseHost: string | null = null;
           if (CANVAS_BASE_URL) {
             try {
