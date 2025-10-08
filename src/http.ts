@@ -15,6 +15,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { config } from './config.js';
+import logger from './logger.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -75,6 +76,9 @@ const parseCanvasErrors = (data: unknown): string | null => {
 };
 
 const raiseCanvasError = (error: unknown): never => {
+  const timestamp = new Date().toISOString();
+  const safeMessage = 'Canvas request failed; check server logs for details';
+
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
@@ -83,11 +87,50 @@ const raiseCanvasError = (error: unknown): never => {
     const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
       .filter(Boolean)
       .join(': ');
+
+    if (isProduction) {
+      const requestConfig = error.config;
+      const baseForLog = requestConfig?.baseURL ?? CANVAS_BASE_URL || undefined;
+      const rawUrl = requestConfig?.url;
+      let resolvedUrl: string | undefined;
+      if (rawUrl) {
+        try {
+          resolvedUrl = baseForLog ? new URL(rawUrl, baseForLog).toString() : rawUrl;
+        } catch {
+          resolvedUrl = rawUrl;
+        }
+      } else if (baseForLog) {
+        resolvedUrl = baseForLog;
+      }
+
+      logger.error('Canvas request failed', {
+        timestamp,
+        status,
+        statusText,
+        method: requestConfig?.method ? requestConfig.method.toUpperCase() : 'UNKNOWN',
+        url: resolvedUrl,
+        details: details || fallback,
+      });
+
+      throw new Error(safeMessage);
+    }
+
     throw new Error(description);
   }
+
   if (error instanceof Error) {
+    if (isProduction) {
+      logger.error('Canvas error', { timestamp, error: error.stack ?? error.message });
+      throw new Error(safeMessage);
+    }
     throw error;
   }
+
+  if (isProduction) {
+    logger.error('Canvas unknown error', { timestamp, error });
+    throw new Error(safeMessage);
+  }
+
   throw new Error(String(error));
 };
 
@@ -1058,9 +1101,9 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   }
   sessions.clear();
   if (signal === 'SIGINT') {
-    console.log('Received SIGINT, shut down gracefully.');
+    logger.info('Received SIGINT, shut down gracefully.');
   } else if (signal === 'SIGTERM') {
-    console.log('Received SIGTERM, shut down gracefully.');
+    logger.info('Received SIGTERM, shut down gracefully.');
   }
 };
 
@@ -1071,8 +1114,10 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
 });
 
 if (SHOULD_LISTEN) {
-  httpServer = app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+  httpServer = app.listen(PORT, '127.0.0.1', () =>
+    logger.info('SANITY MCP server listening', { url: `http://127.0.0.1:${PORT}/mcp` })
+  );
 } else {
   const { toolNames } = createServer();
-  console.log(JSON.stringify({ registeredTools: toolNames }, null, 2));
+  logger.info('Registered tools (listen disabled)', { toolNames });
 }
