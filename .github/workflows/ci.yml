@@ -106,7 +106,7 @@ jobs:
             rm -f server.pid
           fi
           pkill -f "node dist/http.js" || true
-          [ -f server.log ] && tail -n +200 server.log || true
+          [ -f server.log ] && tail -n 200 server.log || true
 
       - name: Upload logs
         if: always()

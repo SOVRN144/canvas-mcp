@@ -1031,8 +1031,9 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-const PORT = config.port;
-const SHOULD_LISTEN = !config.disableHttpListen;
+// Defaults that work in CI
+const PORT = Number(process.env.PORT ?? config.port ?? 8787);
+const HOST = process.env.HOST ?? '127.0.0.1';
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
@@ -1072,10 +1073,12 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   });
 });
 
-if (SHOULD_LISTEN) {
-  httpServer = app.listen(PORT, '127.0.0.1', () =>
-    logger.info('SANITY MCP server listening', { url: `http://127.0.0.1:${PORT}/mcp` })
-  );
+// If we're running as the main module (node dist/http.js), start the HTTP server
+if (require.main === module || !config.disableHttpListen) {
+  httpServer = app.listen(PORT, HOST, () => {
+    // Single-line log the CI can show when tailing server.log
+    logger.info(`MCP server listening`, { host: HOST, port: PORT, path: '/mcp' });
+  });
 } else {
   const { toolNames } = createServer();
   logger.info('Registered tools (listen disabled)', { toolNames });
