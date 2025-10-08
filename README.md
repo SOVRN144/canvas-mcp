@@ -1,5 +1,8 @@
 # canvas-mcp
 
+[![CI](https://github.com/SOVRN144/canvas-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/SOVRN144/canvas-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SOVRN144/canvas-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/SOVRN144/canvas-mcp/actions/workflows/codeql.yml)
+
 Minimal MCP server (Streamable HTTP) with an `echo` tool.
 
 ## Dev

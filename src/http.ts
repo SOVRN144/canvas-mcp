@@ -1,7 +1,13 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
-import axios, { AxiosInstance, AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios';
+import axios, {
+  AxiosInstance,
+  AxiosHeaders,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+  type CreateAxiosDefaults,
+} from 'axios';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -14,20 +20,20 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { config } from './config.js';
+import logger from './logger.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
-// Robust TTL parsing with sane default (10m) when env is missing/empty/invalid
-const rawSessionTtl = process.env.SESSION_TTL_MS;
-const SESSION_TTL_MS = (() => {
-  const v = rawSessionTtl ? Number.parseInt(rawSessionTtl, 10) : NaN;
-  return Number.isFinite(v) && v > 0 ? v : 10 * 60 * 1000;
-})();
-const isProduction = process.env.NODE_ENV === 'production';
-const DEBUG_TOKEN = process.env.DEBUG_TOKEN?.trim() ?? '';
+const SESSION_TTL_MS =
+  config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
+    ? config.sessionTtlMs
+    : 10 * 60 * 1000;
+const isProduction = config.nodeEnv === 'production';
+const DEBUG_TOKEN = config.debugToken ?? '';
 
 // ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
@@ -41,17 +47,25 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL?.trim() || '';
-const CANVAS_TOKEN = process.env.CANVAS_TOKEN?.trim() || '';
+const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
+const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
 const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
 
-const canvasClient: AxiosInstance | null = hasCanvas
-  ? axios.create({
-      baseURL: CANVAS_BASE_URL,
-      headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
-      timeout: 15_000,
-    })
-  : null;
+const canvasClient: AxiosInstance | null = (() => {
+  if (!hasCanvas) {
+    return null;
+  }
+  const options: { baseURL?: string; headers?: AxiosHeaders; timeout: number } = {
+    timeout: 15_000,
+  };
+  if (CANVAS_BASE_URL) {
+    options.baseURL = CANVAS_BASE_URL;
+  }
+  if (config.canvasToken) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
+  }
+  return axios.create(options);
+})();
 
 const logCanvasErrorEvent = (details: {
   status?: number | null;
@@ -113,10 +127,9 @@ const raiseCanvasError = (error: unknown): never => {
     });
 
     if (isProduction) {
-      const config = error.config;
-      const baseForLog =
-        config?.baseURL ?? canvasClient?.defaults?.baseURL ?? (CANVAS_BASE_URL || undefined);
-      const rawUrl = config?.url;
+      const requestConfig = error.config;
+      const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
+      const rawUrl = requestConfig?.url;
       let resolvedUrl: string | undefined;
       if (rawUrl) {
         try {
@@ -181,7 +194,7 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   let query = params;
   let pageCount = 0;
   const seenPaths = new Set<string>();
-  const resolutionBase = canvasClient.defaults?.baseURL ?? CANVAS_BASE_URL;
+  const resolutionBase = canvasClient.defaults?.baseURL ?? config.canvasBaseUrl;
   if (!resolutionBase) {
     throw new Error('No Canvas base URL configured for pagination.');
   }
@@ -193,8 +206,8 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const currentUrl =
-        /^https?:\/\//i.test(nextUrl) ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const isAbsoluteUrl = /^https?:\/\//i.test(nextUrl);
+      const currentUrl = isAbsoluteUrl ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
@@ -367,8 +380,8 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(process.env.CANVAS_BASE_URL),
-        hasCanvasToken: Boolean(process.env.CANVAS_TOKEN),
+        hasCanvasBaseUrl: Boolean(CANVAS_BASE_URL),
+        hasCanvasToken: Boolean(CANVAS_TOKEN),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
@@ -578,7 +591,7 @@ const createServer = () => {
           allowedHosts.add('canvas-user-content.com');
 
           const shouldSendAuthForHost = (hostname: string) =>
-            Boolean(CANVAS_TOKEN) && baseHost !== null && hostname === baseHost;
+            Boolean(config.canvasToken) && baseHost !== null && hostname === baseHost;
 
           const fetchBinary = async (
             urlString: string,
@@ -587,8 +600,8 @@ const createServer = () => {
           ): Promise<AxiosResponse<Readable>> => {
             const currentUrl = new URL(urlString);
             const headers =
-              sendAuth && CANVAS_TOKEN
-                ? AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` })
+              sendAuth && config.canvasToken
+                ? AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` })
                 : undefined;
 
             try {
@@ -693,10 +706,7 @@ const createServer = () => {
 // ---- Express wiring ----
 export const app = express();
 
-const allowedOrigins = (process.env.CORS_ALLOW_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const allowedOrigins = config.corsAllowOrigins;
 
 const trustProxyValue = process.env.TRUST_PROXY;
 if (typeof trustProxyValue === 'string' && trustProxyValue.length > 0) {
@@ -1052,7 +1062,11 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
         await pendingPromise;
       } finally {
         for (const key of pendingKeys) {
-          if (pendingSessions.get(key) === pendingPromise) {
+          // We intentionally compare the Promise object identity to avoid deleting a
+          // newer promise that may have replaced this entry during a race.
+          /* codeql[js/missing-await]: do not await here; identity comparison is intentional */
+          const current = pendingSessions.get(key);
+          if (Object.is(current, pendingPromise)) {
             pendingSessions.delete(key);
           }
         }
@@ -1136,8 +1150,8 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-const PORT = Number(process.env.PORT ?? '8787');
-const SHOULD_LISTEN = process.env.DISABLE_HTTP_LISTEN !== '1';
+const PORT = config.port;
+const SHOULD_LISTEN = !config.disableHttpListen;
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
@@ -1165,9 +1179,9 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   }
   sessions.clear();
   if (signal === 'SIGINT') {
-    console.log('Received SIGINT, shut down gracefully.');
+    logger.info('Received SIGINT, shut down gracefully.');
   } else if (signal === 'SIGTERM') {
-    console.log('Received SIGTERM, shut down gracefully.');
+    logger.info('Received SIGTERM, shut down gracefully.');
   }
 };
 
@@ -1178,8 +1192,10 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
 });
 
 if (SHOULD_LISTEN) {
-  httpServer = app.listen(PORT, '127.0.0.1', () => console.log(`SANITY MCP on http://127.0.0.1:${PORT}/mcp`));
+  httpServer = app.listen(PORT, '127.0.0.1', () =>
+    logger.info('SANITY MCP server listening', { url: `http://127.0.0.1:${PORT}/mcp` })
+  );
 } else {
   const { toolNames } = createServer();
-  console.log(JSON.stringify({ registeredTools: toolNames }, null, 2));
+  logger.info('Registered tools (listen disabled)', { toolNames });
 }
