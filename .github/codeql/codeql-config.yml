@@ -1,0 +1,11 @@
+name: "canvas-mcp CodeQL"
+paths:
+  - src
+  - scripts
+  - tests
+paths-ignore:
+  - dist/**
+  - node_modules/**
+  - src/types/**        # generated/type-only helpers
+queries:
+  - uses: security-and-quality
