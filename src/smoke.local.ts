@@ -74,7 +74,7 @@ const ci = (msg: string) => console.log(msg);
     if (Array.isArray(courses)) {
       console.log({ status: listCourses.status, count: courses.length, sample: courses.slice(0, 3) });
     } else {
-      console.log({ notice: 'list_courses failed (continuing)', status: listCourses.status, body: listCourses.body });
+      console.log('::notice::list_courses unavailable (Canvas 5xx or shape mismatch) — continuing');
     }
   }
 

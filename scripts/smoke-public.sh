@@ -51,7 +51,7 @@ if jq -e '.result.tools | map(.name=="list_courses") | any' <<<"${LIST}" >/dev/n
   if jq -e '.result.structuredContent.courses' <<<"${LIST_COURSES}" >/dev/null 2>&1; then
     echo "${LIST_COURSES}" | jq '{count: (.result.structuredContent.courses | length), sample: (.result.structuredContent.courses | map({id, name})[:3])}'
   else
-    echo "NOTICE: list_courses failed (Canvas may be unavailable). Other tools OK."
+    echo "::notice::list_courses unavailable (Canvas 5xx or shape mismatch) — continuing"
   fi
   echo
 fi

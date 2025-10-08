@@ -119,10 +119,10 @@ const raiseCanvasError = (error: unknown): never => {
       .join(': ');
 
     logCanvasErrorEvent({
-      status,
-      statusText,
+      status: status ?? null,
+      statusText: statusText ?? null,
       details: details || fallback,
-      url: error.config?.url,
+      ...(error.config?.url ? { url: error.config.url } : {}),
       timestamp,
     });
 
@@ -148,7 +148,7 @@ const raiseCanvasError = (error: unknown): never => {
   }
 
   if (error instanceof Error) {
-    logCanvasErrorEvent({ status: null, statusText: null, details: error.message, url: undefined, timestamp });
+    logCanvasErrorEvent({ status: null, statusText: null, details: error.message, timestamp });
     if (isProduction) {
       throw new Error(safeMessage);
     }
@@ -156,7 +156,7 @@ const raiseCanvasError = (error: unknown): never => {
   }
 
   if (isProduction) {
-    logCanvasErrorEvent({ status: null, statusText: null, details: String(error), url: undefined, timestamp });
+    logCanvasErrorEvent({ status: null, statusText: null, details: String(error), timestamp });
     throw new Error(safeMessage);
   }
 
@@ -206,18 +206,17 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const isAbsoluteUrl = /^https?:\/\//i.test(nextUrl);
-      const currentUrl = isAbsoluteUrl ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const isAbsolute = /^https?:\/\//i.test(nextUrl);
+      const currentUrl = isAbsolute ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
       }
       seenPaths.add(normalizedPath);
 
-      const response =
-        query !== undefined
-          ? await canvasClient.get(currentUrl.toString(), { params: query })
-          : await canvasClient.get(currentUrl.toString());
+      const response = query !== undefined
+        ? await canvasClient.get(currentUrl.toString(), { params: query })
+        : await canvasClient.get(currentUrl.toString());
       const data = response.data as unknown;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
@@ -443,10 +442,10 @@ const createServer = () => {
                 parseCanvasErrors(primaryError.response?.data) ??
                 (typeof primaryError.message === 'string' ? primaryError.message : 'Canvas request failed');
               logCanvasErrorEvent({
-                status,
-                statusText,
+                status: status ?? null,
+                statusText: statusText ?? null,
                 details,
-                url: primaryError.config?.url,
+                ...(primaryError.config?.url ? { url: primaryError.config.url } : {}),
               });
             }
 
