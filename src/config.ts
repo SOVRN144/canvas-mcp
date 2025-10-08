@@ -24,13 +24,13 @@ const ConfigSchema = z
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().default(8787),
     SESSION_TTL_MS: z
-      .union([z.string(), z.number()])
+      .string()
       .optional()
       .transform((val) => {
-        if (val === undefined || val === '') {
+        if (!val || val.trim() === '') {
           return undefined;
         }
-        const parsed = typeof val === 'number' ? val : Number.parseInt(val, 10);
+        const parsed = Number.parseInt(val, 10);
         if (!Number.isFinite(parsed) || parsed < 0) {
           throw new Error('SESSION_TTL_MS must be a non-negative integer');
         }
@@ -49,6 +49,8 @@ const ConfigSchema = z
     CANVAS_TOKEN: z.string().optional(),
     DISABLE_HTTP_LISTEN: z.enum(['0', '1']).default('0'),
     DEBUG_TOKEN: z.string().optional(),
+    LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+    LOG_FORMAT: z.enum(['json', 'pretty']).default('json'),
   })
   .passthrough();
 
@@ -61,21 +63,17 @@ if (!parsed.success) {
 
 const env = parsed.data;
 
-const sessionTtlMs = env.SESSION_TTL_MS;
-const corsAllowOrigins = env.CORS_ALLOW_ORIGINS ?? [];
-const canvasBaseUrl = env.CANVAS_BASE_URL ?? undefined;
-const canvasToken = env.CANVAS_TOKEN ?? undefined;
-const debugToken = env.DEBUG_TOKEN ?? undefined;
-
 export const config = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
-  sessionTtlMs,
-  corsAllowOrigins,
-  canvasBaseUrl: canvasBaseUrl ?? null,
-  canvasToken: canvasToken ?? null,
+  sessionTtlMs: env.SESSION_TTL_MS,
+  corsAllowOrigins: env.CORS_ALLOW_ORIGINS,
+  canvasBaseUrl: env.CANVAS_BASE_URL,
+  canvasToken: env.CANVAS_TOKEN,
   disableHttpListen: env.DISABLE_HTTP_LISTEN === '1',
-  debugToken: debugToken ?? null,
+  debugToken: env.DEBUG_TOKEN,
+  logLevel: env.LOG_LEVEL,
+  logFormat: env.LOG_FORMAT,
 };
 
 export type AppConfig = typeof config;

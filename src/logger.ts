@@ -1,4 +1,5 @@
 import util from 'node:util';
+import { config } from './config.js';
 
 const LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 export type LogLevel = (typeof LEVELS)[number];
@@ -10,14 +11,12 @@ const levelPriority: Record<LogLevel, number> = {
   error: 40,
 };
 
-let currentLevel: LogLevel =
-  (process.env.LOG_LEVEL as LogLevel | undefined)?.toLowerCase() === 'debug'
-    ? 'debug'
-    : (process.env.LOG_LEVEL as LogLevel | undefined)?.toLowerCase() === 'info'
-      ? 'info'
-      : (process.env.LOG_LEVEL as LogLevel | undefined)?.toLowerCase() === 'warn'
-        ? 'warn'
-        : 'info';
+const parseLogLevel = (value: string | undefined): LogLevel => {
+  const candidate = (value ?? 'info').toLowerCase();
+  return LEVELS.includes(candidate as LogLevel) ? (candidate as LogLevel) : 'info';
+};
+
+let currentLevel: LogLevel = parseLogLevel(config.logLevel);
 
 const formatPayload = (level: LogLevel, message: string, data?: Record<string, unknown>) => {
   const base = {
@@ -27,10 +26,10 @@ const formatPayload = (level: LogLevel, message: string, data?: Record<string, u
     ...data,
   };
 
-  if (process.env.LOG_FORMAT === 'pretty') {
-    const { level: lvl, timestamp, ...rest } = base;
+  if (config.logFormat === 'pretty') {
+    const { level: lvl, timestamp, message: msg, ...rest } = base;
     const meta = Object.keys(rest).length ? ` ${util.inspect(rest, { depth: null, colors: true })}` : '';
-    return `[${timestamp}] ${lvl.toUpperCase()} ${message}${meta}`;
+    return `[${timestamp}] ${lvl.toUpperCase()} ${msg}${meta}`;
   }
 
   return JSON.stringify(base);
@@ -56,7 +55,7 @@ export const logger = {
   warn: (message: string, data?: Record<string, unknown>) => write('warn', message, data),
   error: (message: string, data?: Record<string, unknown>) => write('error', message, data),
   setLevel: (level: LogLevel) => {
-    currentLevel = level;
+    currentLevel = parseLogLevel(level);
   },
 };
 

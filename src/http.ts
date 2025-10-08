@@ -33,7 +33,7 @@ const SESSION_TTL_MS =
     ? config.sessionTtlMs
     : 10 * 60 * 1000;
 const isProduction = config.nodeEnv === 'production';
-const DEBUG_TOKEN = config.debugToken;
+const DEBUG_TOKEN = config.debugToken ?? '';
 
 // ---- MCP server configuration + tool schemas ----
 // Derive version from runtime package metadata to avoid drift with package.json
@@ -47,23 +47,25 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = config.canvasBaseUrl ?? '';
-const CANVAS_TOKEN = config.canvasToken ?? '';
-const hasCanvas = Boolean(config.canvasBaseUrl && config.canvasToken);
+const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
+const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
+const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
 
-let canvasClient: AxiosInstance | null = null;
-if (hasCanvas) {
-  const axiosDefaults: CreateAxiosDefaults = {
+const canvasClient: AxiosInstance | null = (() => {
+  if (!hasCanvas) {
+    return null;
+  }
+  const options: { baseURL?: string; headers?: AxiosHeaders; timeout: number } = {
     timeout: 15_000,
   };
-  if (config.canvasBaseUrl) {
-    axiosDefaults.baseURL = config.canvasBaseUrl;
+  if (CANVAS_BASE_URL) {
+    options.baseURL = CANVAS_BASE_URL;
   }
-  if (CANVAS_TOKEN) {
-    axiosDefaults.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
+  if (config.canvasToken) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
   }
-  canvasClient = axios.create(axiosDefaults);
-}
+  return axios.create(options);
+})();
 
 const parseCanvasErrors = (data: unknown): string | null => {
   if (!data || typeof data !== 'object') {
@@ -102,8 +104,7 @@ const raiseCanvasError = (error: unknown): never => {
 
     if (isProduction) {
       const requestConfig = error.config;
-      const baseForLog =
-        requestConfig?.baseURL ?? canvasClient?.defaults?.baseURL ?? config.canvasBaseUrl ?? undefined;
+      const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
       const rawUrl = requestConfig?.url;
       let resolvedUrl: string | undefined;
       if (rawUrl) {
@@ -190,8 +191,8 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const currentUrl =
-        /^https?:\/\//i.test(nextUrl) ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
+      const isAbsoluteUrl = /^https?:\/\//i.test(nextUrl);
+      const currentUrl = isAbsoluteUrl ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
@@ -531,7 +532,7 @@ const createServer = () => {
           allowedHosts.add('canvas-user-content.com');
 
           const shouldSendAuthForHost = (hostname: string) =>
-            Boolean(CANVAS_TOKEN) && baseHost !== null && hostname === baseHost;
+            Boolean(config.canvasToken) && baseHost !== null && hostname === baseHost;
 
           const fetchBinary = async (
             urlString: string,
@@ -540,8 +541,8 @@ const createServer = () => {
           ): Promise<AxiosResponse<Readable>> => {
             const currentUrl = new URL(urlString);
             const headers =
-              sendAuth && CANVAS_TOKEN
-                ? AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` })
+              sendAuth && config.canvasToken
+                ? AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` })
                 : undefined;
 
             try {
