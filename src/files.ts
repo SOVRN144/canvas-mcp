@@ -1,7 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
 import logger from './logger.js';
-// @ts-ignore - pdf-parse has inconsistent export types
-const pdfParse = require('pdf-parse');
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { getSanitizedCanvasToken } from './config.js';
@@ -149,9 +147,26 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
   return { text: truncated, truncated: true };
 }
 
+/**
+ * Extract text from a PDF buffer using pdf-parse.
+ * Uses dynamic import to support both CJS/ESM builds at runtime.
+ */
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
-    const data = await pdfParse(buffer);
+    // Dynamically import to avoid ESM/CJS interop problems in CI/runtime.
+    const pdfParseModule: any = await import('pdf-parse');
+
+    // Normalize possible export shapes:
+    // - default export is a function
+    // - named export `pdfParse`
+    // - module itself callable (older CJS)
+    const pdfParseFn:
+      | ((buf: Buffer) => Promise<{ text: string }>)
+      = pdfParseModule.default
+        ?? pdfParseModule.pdfParse
+        ?? pdfParseModule;
+
+    const data = await pdfParseFn(buffer);
     return normalizeWhitespace(data.text);
   } catch (error) {
     logger.error('Failed to extract PDF text', { fileId, error: String(error) });
