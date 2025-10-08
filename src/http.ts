@@ -992,7 +992,11 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
         await pendingPromise;
       } finally {
         for (const key of pendingKeys) {
-          if (pendingSessions.get(key) === pendingPromise) {
+          // We intentionally compare the Promise object identity to avoid deleting a
+          // newer promise that may have replaced this entry during a race.
+          /* codeql[js/missing-await]: do not await here; identity comparison is intentional */
+          const current = pendingSessions.get(key);
+          if (Object.is(current, pendingPromise)) {
             pendingSessions.delete(key);
           }
         }
