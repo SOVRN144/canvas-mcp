@@ -12,11 +12,8 @@ const levelPriority: Record<LogLevel, number> = {
 };
 
 const parseLogLevel = (value: string | undefined): LogLevel => {
-  if (!value) {
-    return 'info';
-  }
-  const lower = value.toLowerCase();
-  return LEVELS.includes(lower as LogLevel) ? (lower as LogLevel) : 'info';
+  const candidate = (value ?? 'info').toLowerCase();
+  return LEVELS.includes(candidate as LogLevel) ? (candidate as LogLevel) : 'info';
 };
 
 let currentLevel: LogLevel = parseLogLevel(config.logLevel);
@@ -29,7 +26,7 @@ const formatPayload = (level: LogLevel, message: string, data?: Record<string, u
     ...data,
   };
 
-  if (process.env.LOG_FORMAT === 'pretty') {
+  if (config.logFormat === 'pretty') {
     const { level: lvl, timestamp, message: msg, ...rest } = base;
     const meta = Object.keys(rest).length ? ` ${util.inspect(rest, { depth: null, colors: true })}` : '';
     return `[${timestamp}] ${lvl.toUpperCase()} ${msg}${meta}`;
