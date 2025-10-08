@@ -20,8 +20,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import { config } from './config.js';
 import logger from './logger.js';
+import { config } from './config.js';
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
@@ -74,7 +74,7 @@ const logCanvasErrorEvent = (details: {
   url?: string;
   timestamp?: string;
 }) => {
-  console.error('[Canvas Error]', {
+  logger.error('[Canvas Error]', {
     timestamp: details.timestamp ?? new Date().toISOString(),
     status: details.status ?? null,
     statusText: details.statusText ?? null,
@@ -400,61 +400,23 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          const ensureCanvasClient = () => {
-            if (!canvasClient) {
-              throw new Error('Canvas client not configured');
-            }
-            return canvasClient;
-          };
-
           type CanvasCourse = { id: number; name?: string; course_code?: string; short_name?: string };
           const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
-            const client = ensureCanvasClient();
-            const response = await client.get('/api/v1/courses', { params });
+            const response = await canvasClient.get('/api/v1/courses', { params });
             const data = response.data as unknown;
             if (!Array.isArray(data)) {
-              throw new Error('Unexpected Canvas response for /api/v1/courses');
+              throw new Error('Unexpected Canvas response: courses is not an array');
             }
             return data as CanvasCourse[];
           };
 
-          const primaryParams = {
+          const params = {
             per_page: 50,
-            'enrollment_type[]': 'student',
+            enrollment_type: 'student',
+            enrollment_state: 'active',
           } satisfies Record<string, unknown>;
 
-          let courses: CanvasCourse[];
-          try {
-            courses = await fetchCourses(primaryParams);
-          } catch (primaryError) {
-            const timestamp = new Date().toISOString();
-            const isRecoverable =
-              (axios.isAxiosError(primaryError) && (primaryError.response?.status ?? 0) >= 500) ||
-              (primaryError instanceof Error && /Unexpected Canvas response/i.test(primaryError.message));
-
-            if (!isRecoverable) {
-              throw primaryError;
-            }
-
-            if (axios.isAxiosError(primaryError)) {
-              const status = primaryError.response?.status ?? null;
-              const statusText = primaryError.response?.statusText ?? null;
-              const details =
-                parseCanvasErrors(primaryError.response?.data) ??
-                (typeof primaryError.message === 'string' ? primaryError.message : 'Canvas request failed');
-              logCanvasErrorEvent({
-                status,
-                statusText,
-                details,
-                ...(primaryError.config?.url ? { url: primaryError.config.url } : {}),
-                timestamp,
-              });
-            } else if (primaryError instanceof Error) {
-              logCanvasErrorEvent({ status: null, statusText: null, details: primaryError.message, timestamp });
-            }
-
-            courses = await fetchCourses({ per_page: 50 });
-          }
+          const courses = await fetchCourses(params);
 
           const mapped = courses.map((course) => {
             const id = course.id;

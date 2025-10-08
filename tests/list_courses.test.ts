@@ -11,7 +11,7 @@ process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
 process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
-describe('list_courses fallback behavior', () => {
+describe('list_courses', () => {
   let app: any;
   let mockAxiosInstance: any;
 
@@ -39,23 +39,12 @@ describe('list_courses fallback behavior', () => {
     vi.resetModules();
   });
 
-  it('should fallback when primary 500 → fallback 200 (array)', async () => {
-    // Setup mock responses
-    mockAxiosInstance.get
-      .mockRejectedValueOnce({
-        isAxiosError: true,
-        response: { 
-          status: 500, 
-          statusText: 'Internal Server Error', 
-          data: { errors: [{ message: 'Boom' }] }
-        },
-        config: { url: '/api/v1/courses' },
-        message: 'Request failed with status code 500'
-      })
-      .mockResolvedValueOnce({
-        data: [{ id: 1, name: '', course_code: 'C101', short_name: 'Intro' }],
-        headers: {}
-      });
+  it('should return courses successfully (200)', async () => {
+    // Setup successful response
+    mockAxiosInstance.get.mockResolvedValueOnce({
+      data: [{ id: 1, name: '', course_code: 'C101', short_name: 'Intro' }],
+      headers: {}
+    });
 
     // Initialize session
     const init = await request(app)
@@ -76,28 +65,20 @@ describe('list_courses fallback behavior', () => {
       .set('Mcp-Session-Id', sessionId)
       .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
 
-    // Verify the fallback worked
+    // Verify success response
     expect(result.status).toBe(200);
-    expect(result.body.result?.structuredContent?.courses).toHaveLength(1);
-    expect(result.body.result?.structuredContent?.courses[0]).toStrictEqual({ id: 1, name: 'C101' });
+    expect(result.body.result?.structuredContent?.courses).toEqual([{ id: 1, name: 'C101' }]);
 
-    // Verify axios get was called twice
-    expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
-    
-    // First call should have enrollment_type filter
-    expect(mockAxiosInstance.get).toHaveBeenNthCalledWith(1, '/api/v1/courses', {
-      params: { per_page: 50, 'enrollment_type[]': 'student' }
-    });
-    
-    // Second call (fallback) should not have enrollment_type filter
-    expect(mockAxiosInstance.get).toHaveBeenNthCalledWith(2, '/api/v1/courses', {
-      params: { per_page: 50 }
+    // Verify correct API call
+    expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+    expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/v1/courses', {
+      params: { per_page: 50, enrollment_type: 'student', enrollment_state: 'active' }
     });
   });
 
-  it('should fail when primary 500 → fallback 500', async () => {
-    // Setup both calls to fail with 500
-    const errorResponse = {
+  it('should handle 5xx error', async () => {
+    // Setup 5xx error response
+    mockAxiosInstance.get.mockRejectedValueOnce({
       isAxiosError: true,
       response: { 
         status: 500, 
@@ -106,11 +87,7 @@ describe('list_courses fallback behavior', () => {
       },
       config: { url: '/api/v1/courses' },
       message: 'Request failed with status code 500'
-    };
-    
-    mockAxiosInstance.get
-      .mockRejectedValueOnce(errorResponse)
-      .mockRejectedValueOnce(errorResponse);
+    });
 
     // Initialize session
     const init = await request(app)
@@ -123,7 +100,7 @@ describe('list_courses fallback behavior', () => {
     expect(sessionId).toBeDefined();
     expect(init.status).toBe(200);
 
-    // Call list_courses tool and expect it to fail
+    // Call list_courses tool and expect error
     const result = await request(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
@@ -131,12 +108,41 @@ describe('list_courses fallback behavior', () => {
       .set('Mcp-Session-Id', sessionId)
       .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
 
-    // Verify the error response
+    // Verify error response (JSON-RPC error in 200 envelope)
     expect(result.status).toBe(200);
     expect(result.body.result.isError).toBe(true);
     expect(result.body.result.content[0].text).toMatch(/Canvas/);
+  });
 
-    // Verify both API calls were attempted
-    expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
+  it('should handle non-array response body', async () => {
+    // Setup non-array response
+    mockAxiosInstance.get.mockResolvedValueOnce({
+      data: { message: 'oops' },
+      headers: {}
+    });
+
+    // Initialize session
+    const init = await request(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .set('Content-Type', 'application/json')
+      .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
+    
+    const sessionId = init.headers['mcp-session-id'];
+    expect(sessionId).toBeDefined();
+    expect(init.status).toBe(200);
+
+    // Call list_courses tool and expect error
+    const result = await request(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .set('Content-Type', 'application/json')
+      .set('Mcp-Session-Id', sessionId)
+      .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
+
+    // Verify error response
+    expect(result.status).toBe(200);
+    expect(result.body.result.isError).toBe(true);
+    expect(result.body.result.content[0].text).toMatch(/Canvas/);
   });
 });
