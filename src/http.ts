@@ -41,17 +41,25 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL?.trim() || '';
-const CANVAS_TOKEN = process.env.CANVAS_TOKEN?.trim() || '';
+const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
+const CANVAS_TOKEN = (config.canvasToken ?? '').trim();
 const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
 
-const canvasClient: AxiosInstance | null = hasCanvas
-  ? axios.create({
-      baseURL: CANVAS_BASE_URL,
-      headers: { Authorization: `Bearer ${CANVAS_TOKEN}` },
-      timeout: 15_000,
-    })
-  : null;
+const canvasClient: AxiosInstance | null = (() => {
+  if (!hasCanvas) {
+    return null;
+  }
+  const options: { baseURL?: string; headers?: AxiosHeaders; timeout: number } = {
+    timeout: 15_000,
+  };
+  if (CANVAS_BASE_URL) {
+    options.baseURL = CANVAS_BASE_URL;
+  }
+  if (CANVAS_TOKEN) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
+  }
+  return axios.create(options);
+})();
 
 const parseCanvasErrors = (data: unknown): string | null => {
   if (!data || typeof data !== 'object') {
@@ -90,7 +98,7 @@ const raiseCanvasError = (error: unknown): never => {
 
     if (isProduction) {
       const requestConfig = error.config;
-      const baseForLog = requestConfig?.baseURL ?? CANVAS_BASE_URL || undefined;
+      const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
       const rawUrl = requestConfig?.url;
       let resolvedUrl: string | undefined;
       if (rawUrl) {
