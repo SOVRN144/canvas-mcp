@@ -190,4 +190,38 @@ describe('files/extract plain text', () => {
     const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
     expect(preview).toContain('detected by .txt extension');
   });
+
+  it('handles completely missing content-type header with uppercase extension', async () => {
+    const textContent = 'Plain text file with uppercase extension handling.';
+    
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 555,
+            display_name: 'foo.TXT', // Uppercase extension
+            filename: 'foo.TXT',
+            size: textContent.length,
+            content_type: null, // Canvas metadata also missing
+            url: 'https://files.canvas.example/foo',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from(textContent),
+        headers: {}, // Completely missing content-type header (undefined)
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 555 });
+
+    // Should resolve via extension normalization: .TXT -> text/plain
+    expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain');
+    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+    
+    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    expect(preview).toContain('uppercase extension');
+  });
 });

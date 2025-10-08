@@ -124,9 +124,13 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
   }
 }
 
+// Normalize a MIME type string by removing parameters and lowercasing.
+// Always returns a string (empty when input is falsy).
 function normalizeMime(input?: string): string {
   if (!input) return '';
-  return input.split(';', 1)[0].trim().toLowerCase();
+  const parts = String(input).split(';', 1);
+  const base = (parts[0] ?? '').trim().toLowerCase();
+  return base;
 }
 
 function normalizeWhitespace(text: string): string {
