@@ -296,6 +296,13 @@ type CanvasModule = {
   [k: string]: unknown;
 };
 
+type CanvasCourse = {
+  id: number;
+  name?: string;
+  course_code?: string;
+  short_name?: string;
+};
+
 const fetchModules = async (courseId: number, includeItems: boolean): Promise<CanvasModule[]> => {
   const params: Record<string, unknown> = { per_page: 100 };
   if (includeItems) {
@@ -400,7 +407,6 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          type CanvasCourse = { id: number; name?: string; course_code?: string; short_name?: string };
           const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
             const response = await canvasClient.get('/api/v1/courses', { params });
             const data = response.data as unknown;
