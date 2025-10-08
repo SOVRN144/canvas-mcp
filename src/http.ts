@@ -42,7 +42,7 @@ const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
 const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
-const CANVAS_TOKEN = (config.canvasToken ?? '').trim();
+const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
 const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
 
 const canvasClient: AxiosInstance | null = (() => {
@@ -55,8 +55,8 @@ const canvasClient: AxiosInstance | null = (() => {
   if (CANVAS_BASE_URL) {
     options.baseURL = CANVAS_BASE_URL;
   }
-  if (CANVAS_TOKEN) {
-    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
+  if (config.canvasToken) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
   }
   return axios.create(options);
 })();
@@ -185,7 +185,8 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum page limit (${MAX_PAGES}).`);
       }
 
-      const currentUrl = new URL(nextUrl, resolutionBase);
+      const isAbsoluteUrl = /^https?:\/\//i.test(nextUrl);
+      const currentUrl = isAbsoluteUrl ? new URL(nextUrl) : new URL(nextUrl, resolutionBase);
       const normalizedPath = `${currentUrl.pathname}${currentUrl.search}`;
       if (seenPaths.has(normalizedPath)) {
         throw new Error('Pagination loop detected while fetching Canvas data.');
@@ -525,7 +526,7 @@ const createServer = () => {
           allowedHosts.add('canvas-user-content.com');
 
           const shouldSendAuthForHost = (hostname: string) =>
-            Boolean(CANVAS_TOKEN) && baseHost !== null && hostname === baseHost;
+            Boolean(config.canvasToken) && baseHost !== null && hostname === baseHost;
 
           const fetchBinary = async (
             urlString: string,
@@ -534,8 +535,8 @@ const createServer = () => {
           ): Promise<AxiosResponse<Readable>> => {
             const currentUrl = new URL(urlString);
             const headers =
-              sendAuth && CANVAS_TOKEN
-                ? AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` })
+              sendAuth && config.canvasToken
+                ? AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` })
                 : undefined;
 
             try {
