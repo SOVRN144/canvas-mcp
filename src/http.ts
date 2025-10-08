@@ -427,6 +427,7 @@ const createServer = () => {
           try {
             courses = await fetchCourses(primaryParams);
           } catch (primaryError) {
+            const timestamp = new Date().toISOString();
             const isRecoverable =
               (axios.isAxiosError(primaryError) && (primaryError.response?.status ?? 0) >= 500) ||
               (primaryError instanceof Error && /Unexpected Canvas response/i.test(primaryError.message));
@@ -446,9 +447,10 @@ const createServer = () => {
                 statusText,
                 details,
                 ...(primaryError.config?.url ? { url: primaryError.config.url } : {}),
+                timestamp,
               });
             } else if (primaryError instanceof Error) {
-              logCanvasErrorEvent({ status: null, statusText: null, details: primaryError.message });
+              logCanvasErrorEvent({ status: null, statusText: null, details: primaryError.message, timestamp });
             }
 
             courses = await fetchCourses({ per_page: 50 });
