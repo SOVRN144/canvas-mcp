@@ -143,12 +143,11 @@ function normalizeMime(input?: string): string {
 
 function normalizeWhitespace(text: string): string {
   return text
-    .replace(/\r\n/g, '\n')            // CRLF -> LF
-    .replace(/\r/g, '\n')              // lone CR -> LF
-    .replace(/[ \t]+/g, ' ')           // collapse spaces/tabs (not newlines)
-    .replace(/[ \t]+\n/g, '\n')        // trim trailing spaces per line
-    .replace(/\n[ \t]+/g, '\n')        // trim leading spaces per line
-    .replace(/\n{3,}/g, '\n\n')        // keep paragraph breaks (max 2)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
