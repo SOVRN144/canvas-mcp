@@ -1,30 +1,7 @@
 import { describe, it, expect } from 'vitest';
-
-// We need to test the internal truncateText function
-// Since it's not exported, we'll need to test through the public API
-// But first, let's create a simple unit test file for truncation logic
+import { truncateText, TRUNCATE_SUFFIX } from '../src/files.js';
 
 describe('truncateText edge cases', () => {
-  // We'll implement this by importing and testing the function directly
-  // For now, let's create a standalone test that replicates the logic
-  
-  const TRUNCATE_SUFFIX = '\n\n[…]';
-  
-  function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
-    if (text.length <= maxChars) {
-      return { text, truncated: false };
-    }
-    
-    // Honor very small caps
-    if (maxChars <= TRUNCATE_SUFFIX.length) {
-      return { text: text.substring(0, maxChars), truncated: true };
-    }
-    
-    const sliceEnd = maxChars - TRUNCATE_SUFFIX.length;
-    const truncated = text.substring(0, sliceEnd) + TRUNCATE_SUFFIX;
-    return { text: truncated, truncated: true };
-  }
-
   it('never exceeds maxChars even for very small limits', () => {
     const longText = 'This is a very long piece of text that needs to be truncated properly.';
     
@@ -55,7 +32,7 @@ describe('truncateText edge cases', () => {
     const result = truncateText('Hello world', 10);
     expect(result.text.length).toBe(10);
     expect(result.text).toContain('Hello');
-    expect(result.text).toContain('[…]');
+    expect(result.text).toContain('…');
     expect(result.truncated).toBe(true);
   });
 

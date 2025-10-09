@@ -6,7 +6,7 @@ import { getSanitizedCanvasToken } from './config.js';
 
 const CANVAS_TOKEN = getSanitizedCanvasToken();
 const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
-const TRUNCATE_SUFFIX = '\n\n[…]';
+export const TRUNCATE_SUFFIX = '…';
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
 // PPTX text extraction regex patterns
@@ -146,19 +146,13 @@ function normalizeWhitespace(text: string): string {
     .trim();
 }
 
-function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
-  if (text.length <= maxChars) {
-    return { text, truncated: false };
-  }
-  
-  // NEW: honor very small caps
+export function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
   if (maxChars <= TRUNCATE_SUFFIX.length) {
     return { text: text.substring(0, maxChars), truncated: true };
   }
-  
   const sliceEnd = maxChars - TRUNCATE_SUFFIX.length;
-  const truncated = text.substring(0, sliceEnd) + TRUNCATE_SUFFIX;
-  return { text: truncated, truncated: true };
+  return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
 
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
@@ -368,7 +362,7 @@ export async function extractFileContent(
         if (remainingChars > 0) {
           limitedBlocks.push({
             ...block,
-            text: block.text.substring(0, remainingChars) + '…'
+            text: block.text.substring(0, remainingChars) + TRUNCATE_SUFFIX
           });
         }
         break;
