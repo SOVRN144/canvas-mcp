@@ -138,6 +138,7 @@ jobs:
 
       - name: Guard: ensure Canvas token present
         id: canvas_guard
+        shell: bash
         run: |
           if [ -z "${CANVAS_TOKEN:-}" ]; then
             echo "has_canvas=false" >> "$GITHUB_OUTPUT"
