@@ -45,6 +45,19 @@ async function callTool(sid: string, name: string, args: any) {
   return res.body;
 }
 
+// Helper to extract error message from MCP response
+function getErrorMessage(body: any): string | undefined {
+  // MCP SDK returns errors as result.isError with message in content[0].text
+  if (body?.result?.isError && body.result.content?.[0]?.text) {
+    return body.result.content[0].text;
+  }
+  // Fallback for standard JSON-RPC error format
+  if (body?.error?.message) {
+    return body.error.message;
+  }
+  return undefined;
+}
+
 describe('files/download (download_file)', () => {
   beforeAll(async () => {
     const mod = await import('../src/http');
@@ -118,7 +131,8 @@ describe('files/download (download_file)', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'download_file', { fileId: 888, maxSize: 1024 }); // 1 KB
 
-    expect(body?.error).toBeTruthy();
-    expect(String(body.error.message)).toMatch(/too large|maxSize|extract_file/i);
+    const errorMessage = getErrorMessage(body);
+    expect(errorMessage).toBeTruthy();
+    expect(errorMessage).toMatch(/too large|maxSize|extract_file/i);
   });
 });
