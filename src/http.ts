@@ -48,6 +48,7 @@ const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
+const PREVIEW_MAX_CHARS = 2000; // safe default; configurable later if needed
 const SESSION_TTL_MS =
   config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
     ? config.sessionTtlMs
@@ -552,8 +553,8 @@ const createServer = () => {
           
           // Build a single preview string from blocks (first ~2k chars shown)
           const fullText = result.blocks.map(b => b.text).join('\n\n');
-          const previewText = fullText.length > 2000
-            ? fullText.substring(0, 2000).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+          const previewText = fullText.length > PREVIEW_MAX_CHARS
+            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
             : fullText;
 
           const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
