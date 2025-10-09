@@ -133,8 +133,12 @@ function normalizeMime(input?: string): string {
 
 function normalizeWhitespace(text: string): string {
   return text
-    .replace(/\s+/g, ' ')
-    .replace(/\n\s*\n\s*\n+/g, '\n\n')
+    .replace(/\r\n/g, '\n')            // CRLF -> LF
+    .replace(/\r/g, '\n')              // lone CR -> LF
+    .replace(/[ \t]+/g, ' ')           // collapse spaces/tabs (not newlines)
+    .replace(/[ \t]+\n/g, '\n')        // trim trailing spaces per line
+    .replace(/\n[ \t]+/g, '\n')        // trim leading spaces per line
+    .replace(/\n{3,}/g, '\n\n')        // keep paragraph breaks (max 2)
     .trim();
 }
 
@@ -330,6 +334,9 @@ export async function extractFileContent(
              finalContentType === 'text/markdown') {
     extractedText = normalizeWhitespace(buffer.toString('utf-8'));
     blocks = textToBlocks(extractedText);
+  } else {
+    // Fallback for any content type that passed allow-list but wasn't handled above
+    throw new Error(`File ${fileMeta.id}: unsupported content type (${finalContentType || 'unknown'})`);
   }
   
   // Apply character limit
