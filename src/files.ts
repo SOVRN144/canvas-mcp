@@ -406,7 +406,7 @@ export async function downloadFileAsBase64(
   
   // Check size limit
   if (fileMeta.size > maxSize) {
-    throw new Error(`File ${fileMeta.id}: too large to attach (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${Math.round(maxSize / 1024 / 1024)}MB). Try extract_file instead.`);
+    fail(fileMeta.id, `file exceeds maxSize (${fileMeta.size} > ${maxSize})`);
   }
   
   // Download file content
