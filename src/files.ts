@@ -202,12 +202,8 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     
     // Extract slide content from PPTX structure
     const slideFiles = Object.keys(zip.files)
-      .filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'))
-      .sort((a, b) => {
-        const na = Number(a.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
-        const nb = Number(b.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
-        return na - nb;
-      });
+      .filter(n => n.startsWith('ppt/slides/slide') && n.endsWith('.xml'))
+      .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
       throw new Error(`File ${fileId}: PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
