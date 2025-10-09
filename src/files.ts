@@ -154,9 +154,7 @@ function normalizeWhitespace(text: string): string {
 
 export function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
   if (text.length <= maxChars) return { text, truncated: false };
-  if (maxChars <= TRUNCATE_SUFFIX.length) {
-    return { text: text.substring(0, maxChars), truncated: true };
-  }
+  if (maxChars <= TRUNCATE_SUFFIX.length) return { text: text.substring(0, maxChars), truncated: true };
   const sliceEnd = maxChars - TRUNCATE_SUFFIX.length;
   return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
