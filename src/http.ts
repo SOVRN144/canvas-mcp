@@ -22,7 +22,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
-import { config } from './config.js';
+import { config, getSanitizedCanvasToken } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
 const IS_MAIN = isMain(import.meta.url);
@@ -69,23 +69,25 @@ const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
 const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
-const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
-const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
+const hasCanvas = Boolean(CANVAS_BASE_URL);
 
 function getCanvasClient(): AxiosInstance | null {
-  if (!hasCanvas) {
-    return null;
-  }
-  const options: { baseURL?: string; headers?: AxiosHeaders; timeout: number } = {
-    timeout: 15_000,
+  if (!config.canvasBaseUrl) return null;
+
+  const token = getSanitizedCanvasToken();
+  if (!token) return null; // Require token for Canvas API access
+  
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
   };
-  if (CANVAS_BASE_URL) {
-    options.baseURL = CANVAS_BASE_URL;
-  }
-  if (config.canvasToken) {
-    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
-  }
-  return axios.create(options);
+
+  return axios.create({
+    baseURL: config.canvasBaseUrl,
+    headers,
+    timeout: 30_000,
+  });
 }
 
 function requireCanvasClient(): AxiosInstance {
@@ -419,7 +421,7 @@ const createServer = () => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
         hasCanvasBaseUrl: Boolean(CANVAS_BASE_URL),
-        hasCanvasToken: Boolean(CANVAS_TOKEN),
+        hasCanvasToken: Boolean(getSanitizedCanvasToken()),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
@@ -502,6 +504,7 @@ const createServer = () => {
       async (args) => {
         const { courseId } = ListFilesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();   // <-- create once
           const modules = await fetchModules(courseId, true);
           const fileItems = modules
             .flatMap((module) => (Array.isArray(module.items) ? module.items : []))
@@ -509,7 +512,6 @@ const createServer = () => {
           const files = await Promise.all(
             fileItems.map((item) =>
               withCanvasErrors(async () => {
-                const canvasClient = requireCanvasClient();
                 const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
                 const file = response.data as {
                   id: number;
