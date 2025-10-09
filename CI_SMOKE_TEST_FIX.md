@@ -64,4 +64,20 @@ This is a minimal 2-line fix that resolves the CI failures. All unit tests (35 t
 
 ## Recommendation
 
-Merge this fix into PR21 to resolve the CI failures and allow the PR to proceed to merge.
+Apply the fix to PR21 by either:
+
+### Option 1: Apply the patch file
+```bash
+git checkout feature/files-extract-download
+git apply PR21_CI_FIX.patch
+git add .github/workflows/ci.yml
+git commit -m "Fix CI smoke test: Add missing Accept headers"
+git push
+```
+
+### Option 2: Manual edit
+Edit `.github/workflows/ci.yml` and add `-H 'Accept: application/json, text/event-stream' \` on:
+- Line 95 (after `"Mcp-Session-Id: $SID"`)
+- Line 101 (after `"Mcp-Session-Id: $SID"`)
+
+This minimal 2-line fix will resolve the CI failures and allow PR21 to proceed to merge.
