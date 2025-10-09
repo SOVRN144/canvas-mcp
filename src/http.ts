@@ -548,25 +548,23 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
-        return withCanvasErrors(async () => {
-          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
-          
-          // Build a single preview string from blocks (first ~2k chars shown)
-          const fullText = result.blocks.map(b => b.text).join('\n\n');
-          const previewText = fullText.length > PREVIEW_MAX_CHARS
-            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
-            : fullText;
+        const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+        
+        // Build a single preview string from blocks (first ~2k chars shown)
+        const fullText = result.blocks.map(b => b.text).join('\n\n');
+        const previewText = fullText.length > PREVIEW_MAX_CHARS
+          ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+          : fullText;
 
-          const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
+        const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
 
-          return {
-            content: [
-              // Don't append an extra "[...]"—the ellipsis + structured truncated flag are enough
-              { type: 'text', text: `${summary}\n\n${previewText}` },
-            ],
-            structuredContent: result, // still includes result.truncated
-          };
-        });
+        return {
+          content: [
+            // Don't append an extra "[...]"—the ellipsis + structured truncated flag are enough
+            { type: 'text', text: `${summary}\n\n${previewText}` },
+          ],
+          structuredContent: result, // still includes result.truncated
+        };
       }
     );
 
@@ -587,17 +585,15 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
-        return withCanvasErrors(async () => {
-          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
-          
-          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
-          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
-          
-          return {
-            content: [{ type: 'text', text: attachmentText }],
-            structuredContent: result,
-          };
-        });
+        const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+        
+        const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
+        const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+        
+        return {
+          content: [{ type: 'text', text: attachmentText }],
+          structuredContent: result,
+        };
       }
     );
   }
