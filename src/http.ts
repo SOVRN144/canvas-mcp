@@ -88,6 +88,12 @@ function getCanvasClient(): AxiosInstance | null {
   return axios.create(options);
 }
 
+function requireCanvasClient(): AxiosInstance {
+  const client = getCanvasClient();
+  if (!client) throw new Error('Canvas client not configured');
+  return client;
+}
+
 const logCanvasErrorEvent = (details: {
   status?: number | null;
   statusText?: string | null;
@@ -207,10 +213,7 @@ const parseNextLink = (linkHeader?: string): string | null => {
 };
 
 const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise<T[]> => {
-  const canvasClient = getCanvasClient();
-  if (!canvasClient) {
-    throw new Error('Canvas client not configured');
-  }
+  const canvasClient = requireCanvasClient();
   const results: T[] = [];
   let nextUrl: string | null = url;
   let query = params;
@@ -425,7 +428,7 @@ const createServer = () => {
     }
   );
 
-  if (hasCanvas && getCanvasClient()) {
+  if (hasCanvas) {
     addTool(
       'list_courses',
       {
@@ -436,8 +439,7 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          const canvasClient = getCanvasClient();
-          if (!canvasClient) throw new Error('Canvas client not configured');
+          const canvasClient = requireCanvasClient();
           
           const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
             const response = await canvasClient.get('/api/v1/courses', { params });
@@ -507,8 +509,7 @@ const createServer = () => {
           const files = await Promise.all(
             fileItems.map((item) =>
               withCanvasErrors(async () => {
-                const canvasClient = getCanvasClient();
-                if (!canvasClient) throw new Error('Canvas client not configured');
+                const canvasClient = requireCanvasClient();
                 const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
                 const file = response.data as {
                   id: number;
@@ -554,13 +555,15 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
-        const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
-        
-        // Build a single preview string from blocks (first ~2k chars shown)
-        const fullText = result.blocks.map(b => b.text).join('\n\n');
-        const previewText = fullText.length > PREVIEW_MAX_CHARS
-          ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
-          : fullText;
+        return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+          
+          // Build a single preview string from blocks (first ~2k chars shown)
+          const fullText = result.blocks.map(b => b.text).join('\n\n');
+          const previewText = fullText.length > PREVIEW_MAX_CHARS
+            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+            : fullText;
 
         const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
 
@@ -571,6 +574,7 @@ const createServer = () => {
           ],
           structuredContent: result, // still includes result.truncated
         };
+        });
       }
     );
 
@@ -591,15 +595,18 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
-        const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
-        
-        const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
-        const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
-        
-        return {
-          content: [{ type: 'text', text: attachmentText }],
-          structuredContent: result,
-        };
+        return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+          
+          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
+          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+          
+          return {
+            content: [{ type: 'text', text: attachmentText }],
+            structuredContent: result,
+          };
+        });
       }
     );
   }
