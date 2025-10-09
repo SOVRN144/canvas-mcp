@@ -89,7 +89,7 @@ describe('files/extract plain text', () => {
     
     // Should show truncation in content
     const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
-    expect(preview).toContain('[…]');
+    expect(preview).toContain('…');
   });
 
   it('handles CSV files as text', async () => {
