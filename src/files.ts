@@ -94,7 +94,7 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
   try {
     // Use centralized token handling for file download
     const token = getSanitizedCanvasToken();
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { Accept: '*/*' }; // Canvas needs Accept: */* for binary files
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
@@ -205,7 +205,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
-      fail(fileId, `PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
+      fail(fileId, `PPTX has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
     }
     
     for (const slideFile of slideFiles) {
@@ -297,7 +297,7 @@ export async function extractFileContent(
   const maxBytes = MAX_EXTRACT_MB * 1024 * 1024;
   if (fileMeta.size > maxBytes) {
     const mb = Math.round(fileMeta.size / (1024*1024));
-    fail(fileMeta.id, `too large for extraction (${mb}MB > ${MAX_EXTRACT_MB}MB). Use download_file instead.`);
+    fail(fileMeta.id, `too large for extraction (${mb}MB > ${MAX_EXTRACT_MB}MB limit). Use download_file instead.`);
   }
   
   // Download file content
@@ -320,12 +320,12 @@ export async function extractFileContent(
   const finalContentType = normalizedResponseType || normalizedExtensionType;
   
   if (!finalContentType) {
-    fail(fileMeta.id, 'unsupported or unknown content type');
+    fail(fileMeta.id, 'unable to determine content type');
   }
   
   // Check against strict allow-list
   if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
-    fail(fileMeta.id, `content type not allowed (${finalContentType})`);
+    fail(fileMeta.id, `content type not allowed (${finalContentType || 'unknown'})`);
   }
   
   let blocks: FileContentBlock[] = [];
@@ -409,7 +409,7 @@ export async function downloadFileAsBase64(
   
   // Check size limit
   if (fileMeta.size > maxSize) {
-    fail(fileMeta.id, `file exceeds maxSize (${fileMeta.size} > ${maxSize})`);
+    fail(fileMeta.id, `exceeds maxSize (${fileMeta.size} > ${maxSize}).`);
   }
   
   // Download file content

@@ -78,21 +78,20 @@ const _canvasClientForCheck = (() => {
 const hasCanvas = _canvasClientForCheck;
 
 export function getCanvasClient(): AxiosInstance | null {
-  const baseURL = (process.env.CANVAS_BASE_URL ?? '').trim();
-  const token = getSanitizedCanvasToken(); // returns trimmed string or undefined
+  const token = getSanitizedCanvasToken();
+  const baseURL = process.env.CANVAS_BASE_URL?.trim();
+  if (!token || !baseURL) return null;
 
-  if (!baseURL || !token) return null; // let callers handle null (requireCanvasClient throws)
-
-  const headers: Record<string, string> = {
-    Accept: 'application/json, text/event-stream',
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`, // <— KEY: trimmed token in Authorization
-  };
+  const headers = AxiosHeaders.from({
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/json',
+  });
 
   return axios.create({
     baseURL,
-    headers,
     timeout: 30_000,
+    headers,
+    validateStatus: (s) => s >= 200 && s < 300,
   });
 }
 
@@ -437,10 +436,10 @@ const createServer = () => {
   );
 
   if (hasCanvas) {
-    // Ensure Canvas client can be created (this will trigger axios.create for testing)
-    const _testClient = getCanvasClient();
-    if (_testClient) {
-      // Canvas client is available, register Canvas tools
+    // Canvas tools registered; handlers call requireCanvasClient() and handle null.
+    // Create a client during registration to trigger axios.create for testing
+    const _clientTest = getCanvasClient();
+    
     addTool(
       'list_courses',
       {
@@ -621,7 +620,6 @@ const createServer = () => {
         });
       }
     );
-    } // End Canvas client check
   }
 
   return { server, toolNames };
