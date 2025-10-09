@@ -26,10 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 30
-    env:
-      # Safe to expose; used by the server. Token is optional.
-      CANVAS_BASE_URL: ${{ vars.CANVAS_BASE_URL }}
-      CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,16 +88,18 @@ jobs:
 
           curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SID" \
+            -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq . >/dev/null
 
           curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SID" \
+            -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"ci ping"}}}' \
             | jq -r '.result.content[0].text' | grep -q '^ci ping$'
 
-      # Always stop server (fix duplicate `fi`, kill correct process)
+      # Always stop server (robust cleanup)
       - name: Stop server
         if: always()
         run: |
@@ -111,6 +109,7 @@ jobs:
             rm -f server.pid
           fi
           pkill -f "node dist/http.js" || true
+          echo "---- server.log (last 200 lines) ----"
           [ -f server.log ] && tail -n 200 server.log || true
 
       - name: Upload logs
@@ -125,7 +124,8 @@ jobs:
   smoke-canvas:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.CANVAS_BASE_URL != '' }}
+    # Only run if Canvas envs are set and not from a fork
+    if: ${{ vars.CANVAS_BASE_URL != '' && secrets.CANVAS_TOKEN != '' && github.event.pull_request.head.repo.full_name == github.repository }}
     env:
       CANVAS_BASE_URL: ${{ vars.CANVAS_BASE_URL }}
       CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
@@ -135,61 +135,89 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci || npm install
-
-      - name: Check Canvas envs
-        id: canvas_env
+      - name: Build
         run: |
-          if [ -z "${CANVAS_BASE_URL:-}" ] || [ -z "${CANVAS_TOKEN:-}" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Canvas envs missing; skipping Canvas smoke."
-          fi
+          npm ci || npm install
+          npm run typecheck
+          npm run build
 
       - name: Install CLI deps
-        if: steps.canvas_env.outputs.skip != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq netcat-openbsd
+          sudo apt-get install -y jq
 
-      - name: Start server
-        if: steps.canvas_env.outputs.skip != 'true'
+      - name: Start Canvas MCP server
         run: |
-          nohup npx tsx src/http.ts > server.log 2>&1 &
+          set -euo pipefail
+          LOG_LEVEL=error NODE_ENV=test node dist/http.js > server.log 2>&1 &
           echo $! > server.pid
-          timeout 15 bash -c 'until nc -z 127.0.0.1 8787; do sleep 0.5; done'
 
-      - name: Canvas smoke (courses → modules)
-        if: steps.canvas_env.outputs.skip != 'true'
+      - name: Wait for Canvas server (POST initialize readiness)
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if curl -fsS -X POST http://127.0.0.1:8787/mcp \
+              -H 'Accept: application/json, text/event-stream' \
+              -H 'Content-Type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+              >/dev/null 2>&1
+            then
+              echo "Canvas server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Canvas server did not become ready in time"
+          echo "---- server.log (last 200 lines) ----"
+          [ -f server.log ] && tail -n 200 server.log || true
+          exit 1
+
+      - name: Canvas smoke (courses → modules → files)
         run: |
           set -euo pipefail
           H=$(mktemp)
-          curl -sD "$H" -H 'Accept: application/json, text/event-stream' \
-               -H 'Content-Type: application/json' \
-               --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-               http://127.0.0.1:8787/mcp | jq . > init.json
-          SESSION=$(awk -F': *' 'tolower($1)=="mcp-session-id" {print $2}' "$H" | tr -d '\r')
-          test -n "$SESSION"
-          TOOLS=$(curl -s http://127.0.0.1:8787/mcp \
+          
+          # Initialize with proper headers
+          curl -fsS -D "$H" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+            http://127.0.0.1:8787/mcp | tee init.json >/dev/null
+          
+          SESSION=$(awk -F': *' 'tolower($1)=="mcp-session-id"{print $2}' "$H" | tr -d '\r')
+          test -n "$SESSION"
+          
+          # Tools list with proper headers
+          TOOLS=$(curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SESSION" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
           echo "$TOOLS" | jq .
           echo "$TOOLS" | jq -e '.result.tools | map(.name=="list_courses") | any'
-          curl -sS http://127.0.0.1:8787/mcp \
+          
+          # Canvas API test with proper headers and error handling
+          curl -fsS --fail-with-body http://127.0.0.1:8787/mcp \
+            -H "Mcp-Session-Id: $SESSION" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
-            -H "Mcp-Session-Id: $SESSION" \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_courses","arguments":{}}}' | jq .
 
-      - name: Stop server if running
-        if: always() && steps.canvas_env.outputs.skip != 'true'
+      - name: Stop Canvas server
+        if: always()
         run: |
-          if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
-          pkill -f "tsx src/http.ts" || true
+          set -euo pipefail
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" || true
+            rm -f server.pid
+          fi
+          pkill -f "node dist/http.js" || true
+          echo "---- server.log (last 200 lines) ----"
+          [ -f server.log ] && tail -n 200 server.log || true
 
-      - name: Upload logs
-        if: always() && steps.canvas_env.outputs.skip != 'true'
+      - name: Upload Canvas logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: canvas-ci-logs
