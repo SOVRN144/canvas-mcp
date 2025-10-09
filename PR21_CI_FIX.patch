@@ -1,0 +1,39 @@
+From 69f3f9c6d096ec5bfeb501f2d48fb029ad6a20b6 Mon Sep 17 00:00:00 2001
+From: "copilot-swe-agent[bot]" <198982749+Copilot@users.noreply.github.com>
+Date: Thu, 9 Oct 2025 20:14:37 +0000
+Subject: [PATCH] Fix CI smoke test: Add missing Accept headers
+
+The CI smoke tests were failing with HTTP 406 (Not Acceptable) errors
+because the MCP server requires the 'Accept: application/json, text/event-stream'
+header on all requests, but the smoke test only included it on the initialize request.
+
+Added the missing Accept header to:
+- tools/list request (line 95)
+- tools/call request (line 101)
+
+Co-authored-by: SOVRN144 <215043685+SOVRN144@users.noreply.github.com>
+---
+ .github/workflows/ci.yml | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d62ea3e..d95f98e 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -92,11 +92,13 @@ jobs:
+ 
+           curl -fsS http://127.0.0.1:8787/mcp \
+             -H "Mcp-Session-Id: $SID" \
++            -H 'Accept: application/json, text/event-stream' \
+             -H 'Content-Type: application/json' \
+             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq . >/dev/null
+ 
+           curl -fsS http://127.0.0.1:8787/mcp \
+             -H "Mcp-Session-Id: $SID" \
++            -H 'Accept: application/json, text/event-stream' \
+             -H 'Content-Type: application/json' \
+             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"ci ping"}}}' \
+             | jq -r '.result.content[0].text' | grep -q '^ci ping$'
+-- 
+2.51.0
+
