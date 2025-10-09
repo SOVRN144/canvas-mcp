@@ -151,7 +151,13 @@ function truncateText(text: string, maxChars: number): { text: string; truncated
     return { text, truncated: false };
   }
   
-  const truncated = text.substring(0, maxChars - TRUNCATE_SUFFIX.length) + TRUNCATE_SUFFIX;
+  // NEW: honor very small caps
+  if (maxChars <= TRUNCATE_SUFFIX.length) {
+    return { text: text.substring(0, maxChars), truncated: true };
+  }
+  
+  const sliceEnd = maxChars - TRUNCATE_SUFFIX.length;
+  const truncated = text.substring(0, sliceEnd) + TRUNCATE_SUFFIX;
   return { text: truncated, truncated: true };
 }
 
@@ -199,15 +205,19 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     const blocks: FileContentBlock[] = [];
     
     // Extract slide content from PPTX structure
-    const slideFiles = Object.keys(zip.files).filter(name => 
-      name.startsWith('ppt/slides/slide') && name.endsWith('.xml')
-    );
+    const slideFiles = Object.keys(zip.files)
+      .filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'))
+      .sort((a, b) => {
+        const na = Number(a.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
+        const nb = Number(b.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
+        return na - nb;
+      });
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
       throw new Error(`File ${fileId}: PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
     }
     
-    for (const slideFile of slideFiles.sort()) {
+    for (const slideFile of slideFiles) {
       const file = zip.files[slideFile];
       if (!file) {
         throw new Error(`File ${fileId}: slide not found (${slideFile})`);
@@ -231,8 +241,8 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       }
       
       // Extract all text content
-      const textMatches = slideXml.matchAll(PPTX_TEXT_GLOBAL);
-      const slideTexts = Array.from(textMatches).map(match => match[1]).slice(1); // Skip title
+      const textMatches = Array.from(slideXml.matchAll(PPTX_TEXT_GLOBAL)).map(m => m[1]);
+      const slideTexts = titleMatch ? textMatches.slice(1) : textMatches;
       
       if (slideTexts.length > 0) {
         blocks.push({

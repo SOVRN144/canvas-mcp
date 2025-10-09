@@ -187,4 +187,108 @@ describe('files/extract PPTX', () => {
     expect(body?.error).toBeTruthy();
     expect(body.error.message).toMatch(/File 999: PPTX file has too many slides \(501 > 500\)/);
   });
+
+  it('respects numeric slide ordering (slide2.xml < slide10.xml)', async () => {
+    // Mock zip with slides in non-alphabetical order
+    const mockZip = {
+      files: {
+        'ppt/slides/slide10.xml': {
+          async: vi.fn().mockResolvedValue('<a:t>Slide 10</a:t>')
+        },
+        'ppt/slides/slide2.xml': {
+          async: vi.fn().mockResolvedValue('<a:t>Slide 2</a:t>')
+        },
+        'ppt/slides/slide1.xml': {
+          async: vi.fn().mockResolvedValue('<a:t>Slide 1</a:t>')
+        }
+      }
+    };
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 777,
+            display_name: 'NumericOrder.pptx',
+            filename: 'NumericOrder.pptx',
+            size: 2048,
+            content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files.canvas.example/numeric',
+          },
+        });
+      }
+      // File download
+      return Promise.resolve({
+        data: Buffer.from('dummy'),
+        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 777, mode: 'slides' });
+
+    expect(body?.result?.structuredContent).toBeTruthy();
+    const blocks = body.result.structuredContent.blocks;
+    
+    // Should be ordered: slide1, slide2, slide10 (not slide1, slide10, slide2)
+    expect(blocks[0].text).toContain('Slide 1');
+    expect(blocks[1].text).toContain('Slide 2'); 
+    expect(blocks[2].text).toContain('Slide 10');
+  });
+
+  it('skips first text run only when title exists', async () => {
+    // Test slide with title - should skip first <a:t>
+    const slideWithTitle = '<a:t>Title Text</a:t><a:t>Body Text 1</a:t><a:t>Body Text 2</a:t>';
+    // Test slide without title - should keep all <a:t>
+    const slideWithoutTitle = '<a:t>Body Text 1</a:t><a:t>Body Text 2</a:t>';
+    
+    const mockZip = {
+      files: {
+        'ppt/slides/slide1.xml': {
+          async: vi.fn().mockResolvedValue(slideWithTitle)
+        },
+        'ppt/slides/slide2.xml': {
+          async: vi.fn().mockResolvedValue(slideWithoutTitle)
+        }
+      }
+    };
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+
+    get.mockReset();
+    get.mockImplementation((url: string) => {
+      if (/\/api\/v1\/files\/\d+/.test(url)) {
+        return Promise.resolve({
+          data: {
+            id: 888,
+            display_name: 'ConditionalSkip.pptx',
+            filename: 'ConditionalSkip.pptx', 
+            size: 1024,
+            content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files.canvas.example/conditional',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: Buffer.from('dummy'),
+        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      });
+    });
+
+    const sid = await initSession();
+    const body = await callTool(sid, 'extract_file', { fileId: 888, mode: 'slides' });
+
+    expect(body?.result?.structuredContent).toBeTruthy();
+    const blocks = body.result.structuredContent.blocks;
+    
+    // Slide 1 with title: heading should use title, paragraph should have body texts
+    expect(blocks[0].text).toBe('Slide 1 — Title Text');
+    expect(blocks[1].text).toContain('Body Text 1 Body Text 2');
+    
+    // Slide 2 without title: heading generic, paragraph should have ALL texts
+    expect(blocks[2].text).toBe('Slide 2');
+    expect(blocks[3].text).toContain('Body Text 1 Body Text 2');
+  });
+  });
 });
