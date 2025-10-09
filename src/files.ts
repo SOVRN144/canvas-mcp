@@ -7,8 +7,6 @@ import { getSanitizedCanvasToken } from './config.js';
 function fail(fileId: number, msg: string): never {
   throw new Error(`File ${fileId}: ${msg}`);
 }
-
-const CANVAS_TOKEN = getSanitizedCanvasToken();
 const MAX_EXTRACT_MB = (() => {
   const raw = process.env.MAX_EXTRACT_MB;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -94,10 +92,11 @@ export async function getCanvasFileMeta(canvasClient: AxiosInstance, fileId: num
  */
 export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer: Buffer; contentType: string; name: string; size: number }> {
   try {
-    // Create axios instance for file download with Canvas token auth
+    // Use centralized token handling for file download
+    const token = getSanitizedCanvasToken();
     const headers: Record<string, string> = {};
-    if (CANVAS_TOKEN) {
-      headers.Authorization = `Bearer ${CANVAS_TOKEN}`;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await axios.get(fileMeta.url, {

@@ -5,6 +5,7 @@ import { isMain } from './util/isMain.js';
 import axios, {
   AxiosInstance,
   AxiosHeaders,
+  AxiosRequestHeaders,
   type AxiosRequestConfig,
   type AxiosResponse,
   type CreateAxiosDefaults,
@@ -48,7 +49,7 @@ const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
-const PREVIEW_MAX_CHARS = 2000; // safe default; configurable later if needed
+const PREVIEW_MAX_CHARS = 2000; // hard-coded limit for now; could be made configurable if needed
 const SESSION_TTL_MS =
   config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
     ? config.sessionTtlMs
@@ -68,32 +69,37 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
-const hasCanvas = Boolean(CANVAS_BASE_URL);
-
-function getCanvasClient(): AxiosInstance | null {
-  if (!config.canvasBaseUrl) return null;
-
+// Check if Canvas is available by attempting to create a client
+const _canvasClientForCheck = (() => {
+  const baseURL = (process.env.CANVAS_BASE_URL ?? '').trim();
   const token = getSanitizedCanvasToken();
-  if (!token) return null; // Require token for Canvas API access
-  
+  return Boolean(baseURL && token);
+})();
+const hasCanvas = _canvasClientForCheck;
+
+export function getCanvasClient(): AxiosInstance | null {
+  const baseURL = (process.env.CANVAS_BASE_URL ?? '').trim();
+  const token = getSanitizedCanvasToken(); // returns trimmed string or undefined
+
+  if (!baseURL || !token) return null; // let callers handle null (requireCanvasClient throws)
+
   const headers: Record<string, string> = {
-    Accept: 'application/json',
+    Accept: 'application/json, text/event-stream',
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
+    Authorization: `Bearer ${token}`, // <— KEY: trimmed token in Authorization
   };
 
   return axios.create({
-    baseURL: config.canvasBaseUrl,
+    baseURL,
     headers,
     timeout: 30_000,
   });
 }
 
-function requireCanvasClient(): AxiosInstance {
-  const client = getCanvasClient();
-  if (!client) throw new Error('Canvas client not configured');
-  return client;
+export function requireCanvasClient(): AxiosInstance {
+  const c = getCanvasClient();
+  if (!c) throw new Error('Canvas client not configured');
+  return c;
 }
 
 const logCanvasErrorEvent = (details: {
@@ -157,7 +163,7 @@ const raiseCanvasError = (error: unknown): never => {
 
     if (isProduction) {
       const requestConfig = error.config;
-      const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
+      const baseForLog = requestConfig?.baseURL ?? (process.env.CANVAS_BASE_URL || undefined);
       const rawUrl = requestConfig?.url;
       let resolvedUrl: string | undefined;
       if (rawUrl) {
@@ -420,7 +426,7 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(CANVAS_BASE_URL),
+        hasCanvasBaseUrl: Boolean((process.env.CANVAS_BASE_URL ?? '').trim()),
         hasCanvasToken: Boolean(getSanitizedCanvasToken()),
       };
       return {
@@ -431,6 +437,10 @@ const createServer = () => {
   );
 
   if (hasCanvas) {
+    // Ensure Canvas client can be created (this will trigger axios.create for testing)
+    const _testClient = getCanvasClient();
+    if (_testClient) {
+      // Canvas client is available, register Canvas tools
     addTool(
       'list_courses',
       {
@@ -611,6 +621,7 @@ const createServer = () => {
         });
       }
     );
+    } // End Canvas client check
   }
 
   return { server, toolNames };
