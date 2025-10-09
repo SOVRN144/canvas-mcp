@@ -136,7 +136,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Guard: ensure Canvas token present
+      - name: "Guard: ensure Canvas token present"
         id: canvas_guard
         shell: bash
         run: |
@@ -185,7 +185,7 @@ jobs:
           [ -f server.log ] && tail -n 200 server.log || true
           exit 1
 
-      - name: Smoke: tools/list
+      - name: "Smoke: tools/list"
         if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
         run: |
           set -euo pipefail
