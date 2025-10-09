@@ -244,6 +244,10 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     
     return blocks;
   } catch (error) {
+    // Re-throw errors that are already properly formatted (start with "File <id>:")
+    if (error instanceof Error && error.message.startsWith(`File ${fileId}:`)) {
+      throw error;
+    }
     logger.error('Failed to extract PPTX text', { fileId, error: String(error) });
     throw new Error(`File ${fileId}: failed to extract text from PPTX file`);
   }

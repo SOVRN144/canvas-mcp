@@ -47,6 +47,19 @@ async function callTool(sid: string, name: string, args: any) {
   return res.body;
 }
 
+// Helper to extract error message from MCP response
+function getErrorMessage(body: any): string | undefined {
+  // MCP SDK returns errors as result.isError with message in content[0].text
+  if (body?.result?.isError && body.result.content?.[0]?.text) {
+    return body.result.content[0].text;
+  }
+  // Fallback for standard JSON-RPC error format
+  if (body?.error?.message) {
+    return body.error.message;
+  }
+  return undefined;
+}
+
 describe('files/extract disallowed types', () => {
   beforeAll(async () => {
     const mod = await import('../src/http');
@@ -77,8 +90,9 @@ describe('files/extract disallowed types', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 999 });
 
-    expect(body?.error).toBeTruthy();
-    expect(body.error.message).toMatch(/File 999: content type not allowed \(application\/zip\)/);
+    const errorMessage = getErrorMessage(body);
+    expect(errorMessage).toBeTruthy();
+    expect(errorMessage).toMatch(/File 999: content type not allowed \(application\/zip\)/);
   });
 
   it('rejects video files with standardized error', async () => {
@@ -105,8 +119,9 @@ describe('files/extract disallowed types', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 888 });
 
-    expect(body?.error).toBeTruthy();
-    expect(body.error.message).toMatch(/File 888: content type not allowed \(video\/mp4\)/);
+    const errorMessage = getErrorMessage(body);
+    expect(errorMessage).toBeTruthy();
+    expect(errorMessage).toMatch(/File 888: content type not allowed \(video\/mp4\)/);
   });
 
   it('rejects image files with standardized error', async () => {
@@ -133,7 +148,8 @@ describe('files/extract disallowed types', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 777 });
 
-    expect(body?.error).toBeTruthy();
-    expect(body.error.message).toMatch(/File 777: content type not allowed \(image\/png\)/);
+    const errorMessage = getErrorMessage(body);
+    expect(errorMessage).toBeTruthy();
+    expect(errorMessage).toMatch(/File 777: content type not allowed \(image\/png\)/);
   });
 });
