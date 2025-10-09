@@ -162,12 +162,9 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule = await import('pdf-parse');
-    const candidate: unknown = (pdfParseModule as any).default ?? (pdfParseModule as any);
-    const pdfParseFn = typeof candidate === 'function'
-      ? (candidate as (buf: Buffer) => Promise<{ text: string }>)
-      : undefined;
-    if (!pdfParseFn) {
+    const pdfParseModule = await import('pdf-parse') as any;
+    const pdfParseFn = (pdfParseModule?.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
+    if (typeof pdfParseFn !== 'function') {
       throw new Error('pdf-parse: missing callable export');
     }
 
