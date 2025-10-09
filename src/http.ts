@@ -72,7 +72,7 @@ const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
 const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
 const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
 
-const canvasClient: AxiosInstance | null = (() => {
+function getCanvasClient(): AxiosInstance | null {
   if (!hasCanvas) {
     return null;
   }
@@ -86,7 +86,7 @@ const canvasClient: AxiosInstance | null = (() => {
     options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
   }
   return axios.create(options);
-})();
+}
 
 const logCanvasErrorEvent = (details: {
   status?: number | null;
@@ -207,6 +207,7 @@ const parseNextLink = (linkHeader?: string): string | null => {
 };
 
 const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise<T[]> => {
+  const canvasClient = getCanvasClient();
   if (!canvasClient) {
     throw new Error('Canvas client not configured');
   }
@@ -424,7 +425,7 @@ const createServer = () => {
     }
   );
 
-  if (hasCanvas && canvasClient) {
+  if (hasCanvas && getCanvasClient()) {
     addTool(
       'list_courses',
       {
@@ -435,6 +436,9 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = getCanvasClient();
+          if (!canvasClient) throw new Error('Canvas client not configured');
+          
           const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
             const response = await canvasClient.get('/api/v1/courses', { params });
             const data = response.data as unknown;
@@ -503,6 +507,8 @@ const createServer = () => {
           const files = await Promise.all(
             fileItems.map((item) =>
               withCanvasErrors(async () => {
+                const canvasClient = getCanvasClient();
+                if (!canvasClient) throw new Error('Canvas client not configured');
                 const response = await canvasClient.get(`/api/v1/files/${item.content_id}`);
                 const file = response.data as {
                   id: number;
@@ -549,6 +555,8 @@ const createServer = () => {
       async (args) => {
         const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = getCanvasClient();
+          if (!canvasClient) throw new Error('Canvas client not configured');
           const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
           
           // Build a single preview string from blocks (first ~2k chars shown)
@@ -588,6 +596,8 @@ const createServer = () => {
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = getCanvasClient();
+          if (!canvasClient) throw new Error('Canvas client not configured');
           const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
           
           const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
