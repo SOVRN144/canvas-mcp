@@ -11,7 +11,7 @@ const get = vi.fn();
 const create = vi.fn(() => ({ get }));
 const AxiosHeaders = { from: (_: any) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
   AxiosHeaders,
 }));
 

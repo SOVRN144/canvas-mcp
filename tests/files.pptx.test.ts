@@ -11,7 +11,7 @@ const get = vi.fn();
 const create = vi.fn(() => ({ get }));
 const AxiosHeaders = { from: (_: any) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
   AxiosHeaders,
 }));
 
@@ -289,6 +289,5 @@ describe('files/extract PPTX', () => {
     // Slide 2 without title: heading generic, paragraph should have ALL texts
     expect(blocks[2].text).toBe('Slide 2');
     expect(blocks[3].text).toContain('Body Text 1 Body Text 2');
-  });
   });
 });
