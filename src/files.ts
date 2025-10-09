@@ -4,6 +4,10 @@ import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { getSanitizedCanvasToken } from './config.js';
 
+function fail(fileId: number, msg: string): never {
+  throw new Error(`File ${fileId}: ${msg}`);
+}
+
 const CANVAS_TOKEN = getSanitizedCanvasToken();
 const MAX_EXTRACT_MB = (() => {
   const raw = process.env.MAX_EXTRACT_MB;
@@ -202,14 +206,12 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
-      throw new Error(`File ${fileId}: PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
+      fail(fileId, `PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
     }
     
     for (const slideFile of slideFiles) {
       const file = zip.files[slideFile];
-      if (!file) {
-        throw new Error(`File ${fileId}: slide not found (${slideFile})`);
-      }
+      if (!file) fail(fileId, `slide not found (${slideFile})`);
       const slideXml = await file.async('text');
       
       // Extract title and content from slide XML
@@ -291,7 +293,8 @@ export async function extractFileContent(
   // Check size limit for extraction
   const maxBytes = MAX_EXTRACT_MB * 1024 * 1024;
   if (fileMeta.size > maxBytes) {
-    throw new Error(`File ${fileMeta.id}: too large for extraction (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${MAX_EXTRACT_MB}MB limit). Use download_file instead.`);
+    const mb = Math.round(fileMeta.size / (1024*1024));
+    fail(fileMeta.id, `too large for extraction (${mb}MB > ${MAX_EXTRACT_MB}MB). Use download_file instead.`);
   }
   
   // Download file content
@@ -313,9 +316,13 @@ export async function extractFileContent(
   // Prefer header (when specific), else extension; both are now safe strings.
   const finalContentType = normalizedResponseType || normalizedExtensionType;
   
+  if (!finalContentType) {
+    fail(fileMeta.id, 'unsupported or unknown content type');
+  }
+  
   // Check against strict allow-list
   if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
-    throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType || 'unknown'})`);
+    fail(fileMeta.id, `content type not allowed (${finalContentType})`);
   }
   
   let blocks: FileContentBlock[] = [];
@@ -338,7 +345,7 @@ export async function extractFileContent(
     blocks = textToBlocks(extractedText);
   } else {
     // Fallback for any content type that passed allow-list but wasn't handled above
-    throw new Error(`File ${fileMeta.id}: unsupported content type (${finalContentType || 'unknown'})`);
+    fail(fileMeta.id, `unsupported content type (${finalContentType})`);
   }
   
   // Apply character limit
