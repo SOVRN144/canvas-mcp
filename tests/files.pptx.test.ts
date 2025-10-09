@@ -282,12 +282,14 @@ describe('files/extract PPTX', () => {
     expect(body?.result?.structuredContent).toBeTruthy();
     const blocks = body.result.structuredContent.blocks;
     
-    // Slide 1 with title: heading should use title, paragraph should have body texts
+    // Slide 1 with title: heading should use title, paragraph should have body texts joined with newlines
     expect(blocks[0].text).toBe('Slide 1 — Title Text');
-    expect(blocks[1].text).toContain('Body Text 1 Body Text 2');
+    expect(blocks[1].text).toContain('Body Text 1');
+    expect(blocks[1].text).toContain('Body Text 2');
     
-    // Slide 2 without title: heading generic, paragraph should have ALL texts
+    // Slide 2 without title: heading generic, paragraph should have ALL texts joined with newlines
     expect(blocks[2].text).toBe('Slide 2');
-    expect(blocks[3].text).toContain('Body Text 1 Body Text 2');
+    expect(blocks[3].text).toContain('Body Text 1');
+    expect(blocks[3].text).toContain('Body Text 2');
   });
 });
