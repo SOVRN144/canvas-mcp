@@ -7,6 +7,10 @@ import { getSanitizedCanvasToken } from './config.js';
 function fail(fileId: number, msg: string): never {
   throw new Error(`File ${fileId}: ${msg}`);
 }
+
+// Helper for consistent PPTX slide limit error message
+const errPptxTooManySlides = (id: number | string, actual: number, limit: number) =>
+  `File ${id}: PPTX file has too many slides (${actual} > ${limit})`;
 const MAX_EXTRACT_MB = (() => {
   const raw = process.env.MAX_EXTRACT_MB;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -205,7 +209,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
-      fail(fileId, `PPTX has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
+      throw new Error(errPptxTooManySlides(fileId, slideFiles.length, MAX_PPTX_SLIDES));
     }
     
     for (const slideFile of slideFiles) {

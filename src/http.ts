@@ -5,7 +5,6 @@ import { isMain } from './util/isMain.js';
 import axios, {
   AxiosInstance,
   AxiosHeaders,
-  AxiosRequestHeaders,
   type AxiosRequestConfig,
   type AxiosResponse,
   type CreateAxiosDefaults,
@@ -69,13 +68,7 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-// Check if Canvas is available by attempting to create a client
-const _canvasClientForCheck = (() => {
-  const baseURL = (process.env.CANVAS_BASE_URL ?? '').trim();
-  const token = getSanitizedCanvasToken();
-  return Boolean(baseURL && token);
-})();
-const hasCanvas = _canvasClientForCheck;
+const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
 export function getCanvasClient(): AxiosInstance | null {
   const token = getSanitizedCanvasToken();
@@ -436,9 +429,9 @@ const createServer = () => {
   );
 
   if (hasCanvas) {
-    // Canvas tools registered; handlers call requireCanvasClient() and handle null.
-    // Create a client during registration to trigger axios.create for testing
-    const _clientTest = getCanvasClient();
+    // Canvas tools registered; handlers call requireCanvasClient() with error handling.
+    // Trigger axios.create during registration for testing
+    getCanvasClient();
     
     addTool(
       'list_courses',
