@@ -85,6 +85,7 @@ jobs:
             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
             http://127.0.0.1:8787/mcp | tee init.json >/dev/null
           SID=$(awk -F': *' 'tolower($1)=="mcp-session-id"{print $2}' "$H" | tr -d '\r')
+          test -n "$SID" || { echo "::error::Missing MCP session id"; exit 1; }
 
           curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SID" \
@@ -210,7 +211,7 @@ jobs:
           echo "$TOOLS" | jq -e '.result.tools | map(.name=="list_courses") | any'
           
           # Canvas API test with proper headers and error handling
-          curl -fsS --fail-with-body http://127.0.0.1:8787/mcp \
+          curl -fsS --fail http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SESSION" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
