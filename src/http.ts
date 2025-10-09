@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
+import { isMain } from './util/isMain.js';
 import axios, {
   AxiosInstance,
   AxiosHeaders,
@@ -22,12 +23,32 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
 import { config } from './config.js';
+import { extractFileContent, downloadFileAsBase64 } from './files.js';
+
+const IS_MAIN = isMain(import.meta.url);
+
+// Process-level error handlers for fail-fast behavior (only in production/main execution)
+if (IS_MAIN || config.nodeEnv === 'production') {
+  process.on('uncaughtException', (err) => {
+    logger.error('uncaughtException during server startup', {
+      error: String(err),
+      stack: (err as any)?.stack ?? null,
+    });
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error('unhandledRejection during server startup', { reason: String(reason) });
+    process.exit(1);
+  });
+}
 
 const MCP_SESSION_HEADER = 'Mcp-Session-Id';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
+const PREVIEW_MAX_CHARS = 2000; // safe default; configurable later if needed
 const SESSION_TTL_MS =
   config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
     ? config.sessionTtlMs
@@ -61,8 +82,8 @@ const canvasClient: AxiosInstance | null = (() => {
   if (CANVAS_BASE_URL) {
     options.baseURL = CANVAS_BASE_URL;
   }
-  if (CANVAS_TOKEN) {
-    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${CANVAS_TOKEN}` });
+  if (config.canvasToken) {
+    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
   }
   return axios.create(options);
 })();
@@ -340,6 +361,13 @@ const ListFilesInputShape = {
 } as const;
 const ListFilesInput = z.object(ListFilesInputShape);
 
+const ExtractFileInputShape = {
+  fileId: z.number(),
+  mode: z.enum(['text', 'outline', 'slides']).optional(),
+  maxChars: z.number().int().positive().max(100_000).optional(),
+} as const;
+const ExtractFileInput = z.object(ExtractFileInputShape);
+
 const DownloadFileInputShape = {
   fileId: z.number(),
   maxSize: z
@@ -502,169 +530,72 @@ const createServer = () => {
       }
     );
 
+    /**
+     * Extract text from Canvas file tool
+     * Downloads and extracts readable text from Canvas files (PDF/DOCX/PPTX/TXT)
+     * @param fileId Canvas file ID to extract from
+     * @param mode Extraction mode (text, outline, slides)
+     * @param maxChars Maximum characters to return
+     * @returns Structured content with text blocks and metadata
+     * @throws If file is too large, unsupported type, or Canvas API fails
+     */
+    addTool(
+      'extract_file',
+      {
+        title: 'Extract text from Canvas file',
+        description: 'Download and extract text from a Canvas file (PDF/DOCX/PPTX/TXT)',
+        inputSchema: ExtractFileInputShape,
+      },
+      async (args) => {
+        const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
+        return withCanvasErrors(async () => {
+          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+          
+          // Build a single preview string from blocks (first ~2k chars shown)
+          const fullText = result.blocks.map(b => b.text).join('\n\n');
+          const previewText = fullText.length > PREVIEW_MAX_CHARS
+            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+            : fullText;
+
+          const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
+
+          return {
+            content: [
+              // Don't append an extra "[...]"—the ellipsis + structured truncated flag are enough
+              { type: 'text', text: `${summary}\n\n${previewText}` },
+            ],
+            structuredContent: result, // still includes result.truncated
+          };
+        });
+      }
+    );
+
+    /**
+     * Download Canvas file as attachment tool
+     * Downloads Canvas files as base64 attachments with size limits
+     * @param fileId Canvas file ID to download
+     * @param maxSize Maximum file size in bytes
+     * @returns Base64-encoded file data for chat attachment
+     * @throws If file exceeds size limit or download fails
+     */
     addTool(
       'download_file',
       {
-        title: 'Download file',
-        description: 'Downloads a file by id to a temporary location',
+        title: 'Download Canvas file as attachment',
+        description: 'Download a Canvas file by id and return a base64 attachment (with optional size cap)',
         inputSchema: DownloadFileInputShape,
       },
       async (args) => {
-        const { fileId, maxSize: requestedMaxSize } = DownloadFileInput.parse(args ?? {});
+        const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
-          const metadataResponse = await canvasClient.get(`/api/v1/files/${fileId}`);
-          const file = metadataResponse.data as {
-            display_name?: string;
-            filename?: string;
-            url?: string;
-            public_url?: string;
-          };
-          const downloadUrl = file.url ?? file.public_url;
-          if (!downloadUrl) {
-            throw new Error('File does not expose a downloadable URL');
-          }
-          const baseName = file.display_name || file.filename || `file-${fileId}`;
-          const safeBase = sanitizeFilename(baseName);
-          const extension = path.extname(safeBase);
-          const stem = extension ? safeBase.slice(0, -extension.length) : safeBase;
-          const filename = `${stem || 'file'}-${fileId}-${Date.now()}${extension}`;
-          const targetPath = path.join(os.tmpdir(), filename);
-          const normalizedMaxSize = Math.min(requestedMaxSize ?? MAX_FILE_SIZE, MAX_FILE_SIZE);
-
-          const allowedHosts = new Set<string>();
-          let baseHost: string | null = null;
-          if (CANVAS_BASE_URL) {
-            try {
-              const baseUrl = new URL(CANVAS_BASE_URL);
-              if (baseUrl.protocol === 'https:') {
-                baseHost = baseUrl.hostname.toLowerCase();
-                allowedHosts.add(baseHost);
-              }
-            } catch {
-              baseHost = null;
-            }
-          }
-
-          let initialHost: string;
-          try {
-            const initialUrl = new URL(downloadUrl);
-            if (initialUrl.protocol !== 'https:') {
-              throw new Error('Only HTTPS downloads are allowed');
-            }
-            initialHost = initialUrl.hostname.toLowerCase();
-            allowedHosts.add(initialHost);
-          } catch {
-            throw new Error('Download URL is invalid');
-          }
-
-          // Known Canvas CDN hostnames can be allowed without forwarding credentials
-          allowedHosts.add('files.instructure.com');
-          allowedHosts.add('canvas-user-content.com');
-
-          const shouldSendAuthForHost = (hostname: string) =>
-            Boolean(config.canvasToken) && baseHost !== null && hostname === baseHost;
-
-          const fetchBinary = async (
-            urlString: string,
-            remainingRedirects: number,
-            sendAuth: boolean
-          ): Promise<AxiosResponse<Readable>> => {
-            const currentUrl = new URL(urlString);
-            const headers =
-              sendAuth && config.canvasToken
-                ? AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` })
-                : undefined;
-
-            try {
-              const requestConfig: AxiosRequestConfig<unknown> = {
-                responseType: 'stream',
-                maxRedirects: 0,
-                maxContentLength: normalizedMaxSize,
-                maxBodyLength: normalizedMaxSize,
-                timeout: 30_000,
-                validateStatus: (status) => status >= 200 && status < 300,
-              };
-              if (headers) {
-                requestConfig.headers = headers;
-              }
-
-              const response = await axios.get<Readable>(currentUrl.toString(), requestConfig);
-
-              const contentLengthHeader = response.headers['content-length'];
-              if (typeof contentLengthHeader === 'string') {
-                const length = Number.parseInt(contentLengthHeader, 10);
-                if (Number.isFinite(length) && length > normalizedMaxSize) {
-                  throw new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`);
-                }
-              }
-
-              return response;
-            } catch (error) {
-              if (
-                axios.isAxiosError(error) &&
-                error.response &&
-                error.response.status >= 300 &&
-                error.response.status < 400
-              ) {
-                if (remainingRedirects <= 0) {
-                  throw new Error('Too many redirects while downloading file');
-                }
-                const locationHeader =
-                  error.response.headers?.['location'] ?? error.response.headers?.['Location'];
-                if (!locationHeader) {
-                  throw new Error('Redirect response missing Location header');
-                }
-                const nextUrl = new URL(locationHeader, currentUrl);
-                if (nextUrl.protocol !== 'https:') {
-                  throw new Error('Redirected to non-HTTPS URL');
-                }
-                const nextHost = nextUrl.hostname.toLowerCase();
-                if (!allowedHosts.has(nextHost)) {
-                  throw new Error(`Redirected to disallowed host: ${nextHost}`);
-                }
-                const nextSendAuth = shouldSendAuthForHost(nextHost);
-                return fetchBinary(nextUrl.toString(), remainingRedirects - 1, nextSendAuth);
-              }
-              throw error;
-            }
-          };
-
-          const downloadResponse = await fetchBinary(
-            downloadUrl,
-            3,
-            shouldSendAuthForHost(initialHost)
-          );
-
-          const readableStream = downloadResponse.data;
-          let streamedBytes = 0;
-          const sizeGuard = new Transform({
-            transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
-              const projectedSize = streamedBytes + chunk.length;
-              if (projectedSize > normalizedMaxSize) {
-                callback(new Error(`File exceeds maximum size of ${normalizedMaxSize} bytes`));
-                return;
-              }
-              streamedBytes = projectedSize;
-              callback(null, chunk);
-            },
-          });
-
-          const writer = createWriteStream(targetPath, { flags: 'w' });
-          try {
-            await pipeline(readableStream, sizeGuard, writer);
-          } catch (error) {
-            await fs.unlink(targetPath).catch(() => undefined);
-            throw error;
-          }
-
-          const cleanupTimer = setTimeout(() => {
-            void fs.unlink(targetPath).catch(() => undefined);
-          }, 5 * 60 * 1000);
-          cleanupTimer.unref();
-          const payload = { path: targetPath };
+          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+          
+          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
+          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+          
           return {
-            content: [{ type: 'text', text: JSON.stringify(payload) }],
-            structuredContent: payload,
+            content: [{ type: 'text', text: attachmentText }],
+            structuredContent: result,
           };
         });
       }
@@ -1121,8 +1052,16 @@ app.delete('/mcp', async (req: Request, res: Response) => {
   res.status(204).end();
 });
 
-const PORT = config.port;
-const SHOULD_LISTEN = !config.disableHttpListen;
+// General fallback defaults (these also work in CI)
+const PORT = (() => {
+  const raw = process.env.PORT ?? config.port ?? 8787;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 1 || num > 65535) {
+    throw new Error(`Invalid PORT: ${raw}`);
+  }
+  return num;
+})();
+const HOST = process.env.HOST ?? '127.0.0.1';
 
 const stopHttpServer = async (): Promise<void> => {
   if (!httpServer) {
@@ -1162,10 +1101,17 @@ const handleShutdown = async (signal: NodeJS.Signals) => {
   });
 });
 
-if (SHOULD_LISTEN) {
-  httpServer = app.listen(PORT, '127.0.0.1', () =>
-    logger.info('SANITY MCP server listening', { url: `http://127.0.0.1:${PORT}/mcp` })
-  );
+// Only start HTTP listener when executed as main AND not explicitly disabled.
+if (IS_MAIN && !config.disableHttpListen) {
+  try {
+    httpServer = app.listen(PORT, HOST, () => {
+      // Single-line log the CI can show when tailing server.log
+      logger.info(`MCP server listening`, { host: HOST, port: PORT, path: '/mcp' });
+    });
+  } catch (e) {
+    logger.error('Failed to start HTTP server', { error: String(e) });
+    process.exit(1);
+  }
 } else {
   const { toolNames } = createServer();
   logger.info('Registered tools (listen disabled)', { toolNames });
