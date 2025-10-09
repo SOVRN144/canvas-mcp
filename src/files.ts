@@ -5,7 +5,13 @@ import JSZip from 'jszip';
 import { getSanitizedCanvasToken } from './config.js';
 
 const CANVAS_TOKEN = getSanitizedCanvasToken();
-const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
+const MAX_EXTRACT_MB = (() => {
+  const raw = process.env.MAX_EXTRACT_MB;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  if (raw) logger.warn('Invalid MAX_EXTRACT_MB value; falling back to default', { raw });
+  return 15;
+})();
 export const TRUNCATE_SUFFIX = '…';
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
