@@ -233,13 +233,13 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       }
       
       // Extract all text content
-      const textMatches = Array.from(slideXml.matchAll(PPTX_TEXT_GLOBAL)).map(m => m[1]);
-      const slideTexts = titleMatch ? textMatches.slice(1) : textMatches;
+      const textMatches = Array.from(slideXml.matchAll(PPTX_TEXT_GLOBAL), m => m[1]);
+      const bodyRuns = titleMatch ? textMatches.slice(1) : textMatches;
       
-      if (slideTexts.length > 0) {
+      if (bodyRuns.length) {
         blocks.push({
           type: 'paragraph',
-          text: normalizeWhitespace(slideTexts.join(' '))
+          text: normalizeWhitespace(bodyRuns.join('\n'))
         });
       }
     }
