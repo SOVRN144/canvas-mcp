@@ -148,16 +148,15 @@ describe('files/extract PPTX', () => {
   });
 
   it('rejects PPTX with too many slides', async () => {
-    // Create a mock with over 500 slides
+    // Create a mock with over 500 slides using shared mock for performance
     const mockZipWithManySlides = {
       files: {} as Record<string, any>
     };
     
-    // Generate 501 slide files
+    // Generate 501 slide files with shared mock for speed
+    const sharedSlideMock = { async: vi.fn().mockResolvedValue('<a:t>Slide text</a:t>') };
     for (let i = 1; i <= 501; i++) {
-      mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = {
-        async: vi.fn().mockResolvedValue('<a:t>Slide text</a:t>')
-      };
+      mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = sharedSlideMock as any;
     }
     
     vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZipWithManySlides as any);

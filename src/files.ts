@@ -9,6 +9,10 @@ const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
 const TRUNCATE_SUFFIX = '\n\n[…]';
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
+// PPTX text extraction regex patterns
+const PPTX_TEXT_SINGLE = /<a:t[^>]*>([^<]+)<\/a:t>/;       // for title
+const PPTX_TEXT_GLOBAL = /<a:t[^>]*>([^<]+)<\/a:t>/g;      // for all text
+
 const ALLOWED_MIME_TYPES = new Set<string>([
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
@@ -211,7 +215,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       const slideXml = await file.async('text');
       
       // Extract title and content from slide XML
-      const titleMatch = slideXml.match(/<a:t[^>]*>([^<]+)<\/a:t>/);
+      const titleMatch = slideXml.match(PPTX_TEXT_SINGLE);
       const slideNumber = slideFile.match(/slide(\d+)\.xml/)?.[1] || '1';
       
       if (titleMatch) {
@@ -227,7 +231,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       }
       
       // Extract all text content
-      const textMatches = slideXml.matchAll(/<a:t[^>]*>([^<]+)<\/a:t>/g);
+      const textMatches = slideXml.matchAll(PPTX_TEXT_GLOBAL);
       const slideTexts = Array.from(textMatches).map(match => match[1]).slice(1); // Skip title
       
       if (slideTexts.length > 0) {
