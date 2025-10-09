@@ -27,8 +27,8 @@ import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
 const IS_MAIN = isMain(import.meta.url);
 
-// Process-level error handlers for fail-fast behavior (only in production/main execution)
-if (IS_MAIN || config.nodeEnv === 'production') {
+// Process-level error handlers for fail-fast behavior (only when this module is entrypoint)
+if (IS_MAIN) {
   process.on('uncaughtException', (err) => {
     logger.error('uncaughtException during server startup', {
       error: String(err),
