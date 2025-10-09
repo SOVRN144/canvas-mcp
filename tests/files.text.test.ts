@@ -203,7 +203,7 @@ describe('files/extract plain text', () => {
             display_name: 'foo.TXT', // Uppercase extension
             filename: 'foo.TXT',
             size: textContent.length,
-            content_type: null, // Canvas metadata also missing
+            // content_type omitted (undefined) to match real Canvas behavior
             url: 'https://files.canvas.example/foo',
           },
         });
