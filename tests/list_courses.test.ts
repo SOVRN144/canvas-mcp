@@ -17,6 +17,7 @@ describe('list_courses', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.resetModules();
     
     // Mock axios instance methods
     mockAxiosInstance = {

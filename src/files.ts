@@ -1,9 +1,15 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { type AxiosInstance } from 'axios';
 import logger from './logger.js';
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { getSanitizedCanvasToken } from './config.js';
 
+/**
+ * Throws a standardized error for file processing failures.
+ * @param fileId Canvas file ID for error context  
+ * @param msg Error message describing the failure
+ * @throws Always throws an Error with format "File ${fileId}: ${msg}"
+ */
 function fail(fileId: number, msg: string): never {
   throw new Error(`File ${fileId}: ${msg}`);
 }
@@ -19,6 +25,7 @@ const MAX_EXTRACT_MB = (() => {
   return 15;
 })();
 export const TRUNCATE_SUFFIX = '…';
+// PPTX slide limit to prevent zip-bomb style attacks and excessive processing time
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
 // PPTX text extraction regex patterns
@@ -320,7 +327,10 @@ export async function extractFileContent(
 
   const normalizedExtensionType = normalizeMime(extensionType);
 
-  // Prefer header (when specific), else extension; both are now safe strings.
+  // Content-type resolution order:
+  // 1. HTTP header (if specific and not generic)
+  // 2. File extension fallback (if header is missing/generic)
+  // 3. Error if neither yields a recognized type
   const finalContentType = normalizedResponseType || normalizedExtensionType;
   
   if (!finalContentType) {
@@ -413,7 +423,7 @@ export async function downloadFileAsBase64(
   
   // Check size limit
   if (fileMeta.size > maxSize) {
-    fail(fileMeta.id, `exceeds maxSize (${fileMeta.size} > ${maxSize}).`);
+    fail(fileMeta.id, `too large for download (${fileMeta.size} bytes > ${maxSize} bytes limit).`);
   }
   
   // Download file content
