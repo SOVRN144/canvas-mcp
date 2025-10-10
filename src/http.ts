@@ -2,10 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
 import { isMain } from './util/isMain.js';
-import axios, {
-  AxiosInstance,
-  AxiosHeaders,
-} from 'axios';
+import axios, { AxiosInstance, AxiosHeaders } from 'axios';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
