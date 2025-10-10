@@ -141,7 +141,7 @@ const raiseCanvasError = (error: unknown): never => {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
     const details = parseCanvasErrors(error.response?.data);
-    const fallback = (axios.isAxiosError(error) ? error.message : undefined) ?? 'Canvas request failed';
+    const fallback = error.message ?? 'Canvas request failed';
     const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
       .filter(Boolean)
       .join(': ');
@@ -182,7 +182,7 @@ const withCanvasErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
     return await operation();
   } catch (error) {
     raiseCanvasError(error); // never returns
-    throw error; // This line is unreachable but satisfies TypeScript
+    /* c8 ignore next */ return undefined as never; // unreachable — satisfy TS & express intent
   }
 };
 
