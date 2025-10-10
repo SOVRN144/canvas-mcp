@@ -149,20 +149,6 @@ const raiseCanvasError = (error: unknown): never => {
     });
 
     if (isProduction) {
-      const requestConfig = error.config;
-      const baseForLog = requestConfig?.baseURL ?? (process.env.CANVAS_BASE_URL || undefined);
-      const rawUrl = requestConfig?.url;
-      let resolvedUrl: string | undefined;
-      if (rawUrl) {
-        try {
-          resolvedUrl = baseForLog ? new URL(rawUrl, baseForLog).toString() : rawUrl;
-        } catch {
-          resolvedUrl = rawUrl;
-        }
-      } else if (baseForLog) {
-        resolvedUrl = baseForLog;
-      }
-
       throw new Error(safeMessage);
     }
 
