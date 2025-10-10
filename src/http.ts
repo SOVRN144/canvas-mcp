@@ -5,9 +5,6 @@ import { isMain } from './util/isMain.js';
 import axios, {
   AxiosInstance,
   AxiosHeaders,
-  type AxiosRequestConfig,
-  type AxiosResponse,
-  type CreateAxiosDefaults,
 } from 'axios';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +41,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
 const PREVIEW_MAX_CHARS = 2000; // hard-coded limit for now; could be made configurable if needed
+// Session timeout (0 = no timeout; sessions persist until server restart)
 const SESSION_TTL_MS =
   config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
     ? config.sessionTtlMs
@@ -65,6 +63,11 @@ const EnvCheckInput = z.object(EnvCheckInputShape);
 
 const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
+/**
+ * Creates and returns a configured Canvas API client if environment is properly set.
+ * Returns null if CANVAS_BASE_URL or CANVAS_TOKEN are missing/empty.
+ * @returns Configured axios instance or null if Canvas not available
+ */
 export function getCanvasClient(): AxiosInstance | null {
   const token = getSanitizedCanvasToken();
   const baseURL = process.env.CANVAS_BASE_URL?.trim();
@@ -83,6 +86,12 @@ export function getCanvasClient(): AxiosInstance | null {
   });
 }
 
+/**
+ * Returns a configured Canvas API client, throwing an error if not available.
+ * Use this in Canvas tool handlers to ensure a client is available.
+ * @returns Configured axios instance
+ * @throws Error if Canvas client is not configured
+ */
 export function requireCanvasClient(): AxiosInstance {
   const c = getCanvasClient();
   if (!c) throw new Error('Canvas client not configured');
@@ -135,7 +144,7 @@ const raiseCanvasError = (error: unknown): never => {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
     const details = parseCanvasErrors(error.response?.data);
-    const fallback = typeof error.message === 'string' ? error.message : 'Canvas request failed';
+    const fallback = (axios.isAxiosError(error) ? error.message : undefined) ?? 'Canvas request failed';
     const description = [status ? `Canvas API ${status}${statusText ? ` ${statusText}` : ''}` : 'Canvas API error', details || fallback]
       .filter(Boolean)
       .join(': ');
@@ -172,10 +181,12 @@ const raiseCanvasError = (error: unknown): never => {
 };
 
 const withCanvasErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
-  return await operation().catch((error) => {
-    raiseCanvasError(error);
-    return undefined as never;
-  });
+  try {
+    return await operation();
+  } catch (error) {
+    raiseCanvasError(error); // never returns
+    throw error; // This line is unreachable but satisfies TypeScript
+  }
 };
 
 const parseNextLink = (linkHeader?: string): string | null => {

@@ -63,6 +63,10 @@ if (!parsed.success) {
 
 const env = parsed.data;
 
+/**
+ * Application configuration object parsed and validated from environment variables.
+ * Provides type-safe access to all app settings with proper defaults.
+ */
 export const config = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
@@ -76,8 +80,14 @@ export const config = {
   logFormat: env.LOG_FORMAT,
 };
 
+/** Type definition for the application configuration object */
 export type AppConfig = typeof config;
 
+/**
+ * Returns the Canvas API token with whitespace trimmed, or undefined if empty.
+ * Use this to get a clean token value for API authentication.
+ * @returns Trimmed Canvas token or undefined if not set/empty
+ */
 export function getSanitizedCanvasToken(): string | undefined {
   return (config.canvasToken ?? '').trim() || undefined;
 }

@@ -49,13 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 90); do
-            if curl -fsS -X POST http://127.0.0.1:8787/mcp \
+            response=$(curl -fsS -X POST http://127.0.0.1:8787/mcp \
               -H 'Accept: application/json, text/event-stream' \
               -H 'Content-Type: application/json' \
-              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-              >/dev/null 2>&1
-            then
-              echo "Server is ready"
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' 2>&1) || true
+            if echo "$response" | jq -e '.result.protocolVersion=="2024-11-05"' >/dev/null 2>&1; then
+              echo "Server is ready with valid JSON-RPC response"
               exit 0
             fi
             sleep 1
@@ -83,22 +82,42 @@ jobs:
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-            http://127.0.0.1:8787/mcp | tee init.json >/dev/null
+            http://127.0.0.1:8787/mcp | tee init.json
+          
+          # Validate initialize response
+          jq -e '.result.protocolVersion=="2024-11-05"' init.json >/dev/null || {
+            echo "::error::Invalid initialize response"
+            cat init.json
+            exit 1
+          }
+          
           SID=$(awk -F': *' 'tolower($1)=="mcp-session-id"{print $2}' "$H" | tr -d '\r')
           test -n "$SID" || { echo "::error::Missing MCP session id"; exit 1; }
 
+          # Validate tools/list response
           curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SID" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
-            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq . >/dev/null
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | tee tools.json
+          jq -e '.result.tools | length > 0' tools.json >/dev/null || {
+            echo "::error::Invalid tools/list response"
+            cat tools.json
+            exit 1
+          }
 
+          # Validate echo response
           curl -fsS http://127.0.0.1:8787/mcp \
             -H "Mcp-Session-Id: $SID" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"ci ping"}}}' \
-            | jq -r '.result.content[0].text' | grep -q '^ci ping$'
+            | tee echo.json
+          jq -e '.result.content[0].text == "ci ping"' echo.json >/dev/null || {
+            echo "::error::Invalid echo response"
+            cat echo.json
+            exit 1
+          }
 
       # Always stop server (robust cleanup)
       - name: Stop server
@@ -122,6 +141,7 @@ jobs:
             server.log
             init.json
 
+  # Canvas integration smoke tests - runs only for trusted PRs to protect secrets
   smoke-canvas:
     runs-on: ubuntu-latest
     needs: build
