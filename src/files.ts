@@ -4,9 +4,21 @@ import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { getSanitizedCanvasToken } from './config.js';
 
-const CANVAS_TOKEN = getSanitizedCanvasToken();
-const MAX_EXTRACT_MB = Number(process.env.MAX_EXTRACT_MB) || 15;
-const TRUNCATE_SUFFIX = '\n\n[…]';
+function fail(fileId: number, msg: string): never {
+  throw new Error(`File ${fileId}: ${msg}`);
+}
+
+// Helper for consistent PPTX slide limit error message
+const errPptxTooManySlides = (id: number | string, actual: number, limit: number) =>
+  `File ${id}: PPTX file has too many slides (${actual} > ${limit})`;
+const MAX_EXTRACT_MB = (() => {
+  const raw = process.env.MAX_EXTRACT_MB;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  if (raw) logger.warn('Invalid MAX_EXTRACT_MB value; falling back to default', { raw });
+  return 15;
+})();
+export const TRUNCATE_SUFFIX = '…';
 const MAX_PPTX_SLIDES = 500; // configurable later if needed
 
 // PPTX text extraction regex patterns
@@ -84,10 +96,11 @@ export async function getCanvasFileMeta(canvasClient: AxiosInstance, fileId: num
  */
 export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer: Buffer; contentType: string; name: string; size: number }> {
   try {
-    // Create axios instance for file download with Canvas token auth
-    const headers: Record<string, string> = {};
-    if (CANVAS_TOKEN) {
-      headers.Authorization = `Bearer ${CANVAS_TOKEN}`;
+    // Use centralized token handling for file download
+    const token = getSanitizedCanvasToken();
+    const headers: Record<string, string> = { Accept: '*/*' }; // Canvas needs Accept: */* for binary files
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await axios.get(fileMeta.url, {
@@ -137,42 +150,28 @@ function normalizeMime(input?: string): string {
 
 function normalizeWhitespace(text: string): string {
   return text
-    .replace(/\r\n/g, '\n')            // CRLF -> LF
-    .replace(/\r/g, '\n')              // lone CR -> LF
-    .replace(/[ \t]+/g, ' ')           // collapse spaces/tabs (not newlines)
-    .replace(/[ \t]+\n/g, '\n')        // trim trailing spaces per line
-    .replace(/\n[ \t]+/g, '\n')        // trim leading spaces per line
-    .replace(/\n{3,}/g, '\n\n')        // keep paragraph breaks (max 2)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
-  if (text.length <= maxChars) {
-    return { text, truncated: false };
-  }
-  
-  // NEW: honor very small caps
-  if (maxChars <= TRUNCATE_SUFFIX.length) {
-    return { text: text.substring(0, maxChars), truncated: true };
-  }
-  
+export function truncateText(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  if (maxChars <= TRUNCATE_SUFFIX.length) return { text: text.substring(0, maxChars), truncated: true };
   const sliceEnd = maxChars - TRUNCATE_SUFFIX.length;
-  const truncated = text.substring(0, sliceEnd) + TRUNCATE_SUFFIX;
-  return { text: truncated, truncated: true };
+  return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
 
-/**
- * Extracts text from PDF files using dynamic ESM import.
- * Expects pdf-parse to provide a default export (modern ESM builds).
- */
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule: any = await import('pdf-parse');
-    const pdfParseFn: (buf: Buffer) => Promise<{ text: string }> = pdfParseModule?.default;
-    if (!pdfParseFn) {
-      // Explicit & actionable error; helps if a future package version changes exports.
-      throw new Error('pdf-parse: missing default export; please verify pdf-parse installation and version.');
+    const pdfParseModule = await import('pdf-parse') as any;
+    const pdfParseFn = (pdfParseModule?.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
+    if (typeof pdfParseFn !== 'function') {
+      throw new Error('pdf-parse: missing callable export');
     }
 
     const data = await pdfParseFn(buffer);
@@ -206,22 +205,16 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     
     // Extract slide content from PPTX structure
     const slideFiles = Object.keys(zip.files)
-      .filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'))
-      .sort((a, b) => {
-        const na = Number(a.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
-        const nb = Number(b.match(/slide(\d+)\.xml/)?.[1] ?? Number.MAX_SAFE_INTEGER);
-        return na - nb;
-      });
+      .filter(n => n.startsWith('ppt/slides/slide') && n.endsWith('.xml'))
+      .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
     if (slideFiles.length > MAX_PPTX_SLIDES) {
-      throw new Error(`File ${fileId}: PPTX file has too many slides (${slideFiles.length} > ${MAX_PPTX_SLIDES})`);
+      throw new Error(errPptxTooManySlides(fileId, slideFiles.length, MAX_PPTX_SLIDES));
     }
     
     for (const slideFile of slideFiles) {
       const file = zip.files[slideFile];
-      if (!file) {
-        throw new Error(`File ${fileId}: slide not found (${slideFile})`);
-      }
+      if (!file) fail(fileId, `slide not found (${slideFile})`);
       const slideXml = await file.async('text');
       
       // Extract title and content from slide XML
@@ -241,13 +234,13 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       }
       
       // Extract all text content
-      const textMatches = Array.from(slideXml.matchAll(PPTX_TEXT_GLOBAL)).map(m => m[1]);
-      const slideTexts = titleMatch ? textMatches.slice(1) : textMatches;
+      const textMatches = Array.from(slideXml.matchAll(PPTX_TEXT_GLOBAL), m => m[1]);
+      const bodyRuns = titleMatch ? textMatches.slice(1) : textMatches;
       
-      if (slideTexts.length > 0) {
+      if (bodyRuns.length) {
         blocks.push({
           type: 'paragraph',
-          text: normalizeWhitespace(slideTexts.join(' '))
+          text: normalizeWhitespace(bodyRuns.join('\n'))
         });
       }
     }
@@ -307,7 +300,8 @@ export async function extractFileContent(
   // Check size limit for extraction
   const maxBytes = MAX_EXTRACT_MB * 1024 * 1024;
   if (fileMeta.size > maxBytes) {
-    throw new Error(`File ${fileMeta.id}: too large for extraction (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${MAX_EXTRACT_MB}MB limit). Use download_file instead.`);
+    const mb = Math.round(fileMeta.size / (1024*1024));
+    fail(fileMeta.id, `too large for extraction (${mb}MB > ${MAX_EXTRACT_MB}MB limit). Use download_file instead.`);
   }
   
   // Download file content
@@ -329,9 +323,13 @@ export async function extractFileContent(
   // Prefer header (when specific), else extension; both are now safe strings.
   const finalContentType = normalizedResponseType || normalizedExtensionType;
   
+  if (!finalContentType) {
+    fail(fileMeta.id, 'unable to determine content type');
+  }
+  
   // Check against strict allow-list
   if (!ALLOWED_MIME_TYPES.has(finalContentType)) {
-    throw new Error(`File ${fileMeta.id}: content type not allowed (${finalContentType || 'unknown'})`);
+    fail(fileMeta.id, `content type not allowed (${finalContentType || 'unknown'})`);
   }
   
   let blocks: FileContentBlock[] = [];
@@ -354,7 +352,7 @@ export async function extractFileContent(
     blocks = textToBlocks(extractedText);
   } else {
     // Fallback for any content type that passed allow-list but wasn't handled above
-    throw new Error(`File ${fileMeta.id}: unsupported content type (${finalContentType || 'unknown'})`);
+    fail(fileMeta.id, `unsupported content type (${finalContentType})`);
   }
   
   // Apply character limit
@@ -374,7 +372,7 @@ export async function extractFileContent(
         if (remainingChars > 0) {
           limitedBlocks.push({
             ...block,
-            text: block.text.substring(0, remainingChars) + '…'
+            text: block.text.substring(0, remainingChars) + TRUNCATE_SUFFIX
           });
         }
         break;
@@ -415,7 +413,7 @@ export async function downloadFileAsBase64(
   
   // Check size limit
   if (fileMeta.size > maxSize) {
-    throw new Error(`File ${fileMeta.id}: too large to attach (${Math.round(fileMeta.size / 1024 / 1024)}MB > ${Math.round(maxSize / 1024 / 1024)}MB). Try extract_file instead.`);
+    fail(fileMeta.id, `exceeds maxSize (${fileMeta.size} > ${maxSize}).`);
   }
   
   // Download file content

@@ -86,4 +86,41 @@ if jq -e '.result.tools | map(.name=="env_check") | any' <<<"${LIST}" >/dev/null
   echo
 fi
 
+# Optional file testing (skip if no FILE_ID provided)
+if [ -n "${FILE_ID:-}" ]; then
+  echo "### tools/call extract_file (optional)"
+  EXTRACT_RESULT="$(curl -s "${PUBLIC_BASE%/}/mcp" \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'Content-Type: application/json' \
+    -H "Mcp-Session-Id: ${SESSION}" \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"extract_file\",\"arguments\":{\"fileId\":${FILE_ID},\"mode\":\"text\"}}}" || true)"
+  
+  if echo "${EXTRACT_RESULT}" | jq -e '.result.structuredContent.blocks' >/dev/null 2>&1; then
+    echo "First 300 chars from extracted file:"
+    echo "${EXTRACT_RESULT}" | jq -r '.result.content[0].text' 2>/dev/null | head -c 300 || echo "Could not extract preview"
+    echo "..."
+  elif echo "${EXTRACT_RESULT}" | jq -e '.error' >/dev/null 2>&1; then
+    echo "::notice::extract_file failed: $(echo "${EXTRACT_RESULT}" | jq -r '.error.message' 2>/dev/null || echo 'unknown error')"
+  else
+    echo "::notice::extract_file test unavailable or failed"
+  fi
+  echo
+  
+  echo "### tools/call download_file (optional)"
+  DOWNLOAD_RESULT="$(curl -s "${PUBLIC_BASE%/}/mcp" \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'Content-Type: application/json' \
+    -H "Mcp-Session-Id: ${SESSION}" \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"download_file\",\"arguments\":{\"fileId\":${FILE_ID},\"maxSize\":1048576}}}" || true)"
+  
+  if echo "${DOWNLOAD_RESULT}" | jq -e '.result.structuredContent.file.name' >/dev/null 2>&1; then
+    echo "${DOWNLOAD_RESULT}" | jq '{filename: .result.structuredContent.file.name, size: .result.structuredContent.file.size, contentType: .result.structuredContent.file.contentType}' 2>/dev/null || echo "Could not parse download result"
+  elif echo "${DOWNLOAD_RESULT}" | jq -e '.error' >/dev/null 2>&1; then
+    echo "::notice::download_file failed: $(echo "${DOWNLOAD_RESULT}" | jq -r '.error.message' 2>/dev/null || echo 'unknown error')"
+  else
+    echo "::notice::download_file test unavailable or failed"
+  fi
+  echo
+fi
+
 echo "OK"

@@ -9,12 +9,7 @@ import axios, {
   type AxiosResponse,
   type CreateAxiosDefaults,
 } from 'axios';
-import os from 'node:os';
-import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
-import { Transform, type TransformCallback, Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -22,13 +17,13 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
-import { config } from './config.js';
+import { config, getSanitizedCanvasToken } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 
 const IS_MAIN = isMain(import.meta.url);
 
-// Process-level error handlers for fail-fast behavior (only in production/main execution)
-if (IS_MAIN || config.nodeEnv === 'production') {
+// Process-level error handlers for fail-fast behavior (only when this module is entrypoint)
+if (IS_MAIN) {
   process.on('uncaughtException', (err) => {
     logger.error('uncaughtException during server startup', {
       error: String(err),
@@ -48,7 +43,7 @@ const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_PAGES = 100;
 const MAX_RESULTS = 10_000;
-const PREVIEW_MAX_CHARS = 2000; // safe default; configurable later if needed
+const PREVIEW_MAX_CHARS = 2000; // hard-coded limit for now; could be made configurable if needed
 const SESSION_TTL_MS =
   config.sessionTtlMs !== undefined && Number.isFinite(config.sessionTtlMs)
     ? config.sessionTtlMs
@@ -68,25 +63,31 @@ const EchoInput = z.object(EchoInputShape);
 const EnvCheckInputShape = {} as const;
 const EnvCheckInput = z.object(EnvCheckInputShape);
 
-const CANVAS_BASE_URL = (config.canvasBaseUrl ?? '').trim();
-const CANVAS_TOKEN = config.canvasToken?.trim() || undefined;
-const hasCanvas = Boolean(CANVAS_BASE_URL && CANVAS_TOKEN);
+const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
-const canvasClient: AxiosInstance | null = (() => {
-  if (!hasCanvas) {
-    return null;
-  }
-  const options: { baseURL?: string; headers?: AxiosHeaders; timeout: number } = {
-    timeout: 15_000,
-  };
-  if (CANVAS_BASE_URL) {
-    options.baseURL = CANVAS_BASE_URL;
-  }
-  if (config.canvasToken) {
-    options.headers = AxiosHeaders.from({ Authorization: `Bearer ${config.canvasToken}` });
-  }
-  return axios.create(options);
-})();
+export function getCanvasClient(): AxiosInstance | null {
+  const token = getSanitizedCanvasToken();
+  const baseURL = process.env.CANVAS_BASE_URL?.trim();
+  if (!token || !baseURL) return null;
+
+  const headers = AxiosHeaders.from({
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/json',
+  });
+
+  return axios.create({
+    baseURL,
+    timeout: 30_000,
+    headers,
+    validateStatus: (s) => s >= 200 && s < 300,
+  });
+}
+
+export function requireCanvasClient(): AxiosInstance {
+  const c = getCanvasClient();
+  if (!c) throw new Error('Canvas client not configured');
+  return c;
+}
 
 const logCanvasErrorEvent = (details: {
   status?: number | null;
@@ -148,20 +149,6 @@ const raiseCanvasError = (error: unknown): never => {
     });
 
     if (isProduction) {
-      const requestConfig = error.config;
-      const baseForLog = requestConfig?.baseURL ?? (CANVAS_BASE_URL || undefined);
-      const rawUrl = requestConfig?.url;
-      let resolvedUrl: string | undefined;
-      if (rawUrl) {
-        try {
-          resolvedUrl = baseForLog ? new URL(rawUrl, baseForLog).toString() : rawUrl;
-        } catch {
-          resolvedUrl = rawUrl;
-        }
-      } else if (baseForLog) {
-        resolvedUrl = baseForLog;
-      }
-
       throw new Error(safeMessage);
     }
 
@@ -207,9 +194,7 @@ const parseNextLink = (linkHeader?: string): string | null => {
 };
 
 const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise<T[]> => {
-  if (!canvasClient) {
-    throw new Error('Canvas client not configured');
-  }
+  const canvasClient = requireCanvasClient();
   const results: T[] = [];
   let nextUrl: string | null = url;
   let query = params;
@@ -260,9 +245,6 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   }
   return results;
 };
-
-const sanitizeFilename = (name: string): string =>
-  name.replace(/[\\/:*?"<>|]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'file';
 
 const buildJsonRpcError = (message: string, id: unknown = null) => ({
   jsonrpc: '2.0',
@@ -414,8 +396,8 @@ const createServer = () => {
     (args) => {
       EnvCheckInput.parse(args ?? {});
       const summary = {
-        hasCanvasBaseUrl: Boolean(CANVAS_BASE_URL),
-        hasCanvasToken: Boolean(CANVAS_TOKEN),
+        hasCanvasBaseUrl: Boolean((process.env.CANVAS_BASE_URL ?? '').trim()),
+        hasCanvasToken: Boolean(getSanitizedCanvasToken()),
       };
       return {
         content: [{ type: 'text', text: JSON.stringify(summary) }],
@@ -424,7 +406,11 @@ const createServer = () => {
     }
   );
 
-  if (hasCanvas && canvasClient) {
+  if (hasCanvas) {
+    // Canvas tools registered; handlers call requireCanvasClient() with error handling.
+    // Trigger axios.create during registration for testing
+    getCanvasClient();
+    
     addTool(
       'list_courses',
       {
@@ -435,6 +421,8 @@ const createServer = () => {
       async (args) => {
         ListCoursesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          
           const fetchCourses = async (params: Record<string, unknown>): Promise<CanvasCourse[]> => {
             const response = await canvasClient.get('/api/v1/courses', { params });
             const data = response.data as unknown;
@@ -496,6 +484,7 @@ const createServer = () => {
       async (args) => {
         const { courseId } = ListFilesInput.parse(args ?? {});
         return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();   // <-- create once
           const modules = await fetchModules(courseId, true);
           const fileItems = modules
             .flatMap((module) => (Array.isArray(module.items) ? module.items : []))
@@ -548,13 +537,15 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
-        const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
-        
-        // Build a single preview string from blocks (first ~2k chars shown)
-        const fullText = result.blocks.map(b => b.text).join('\n\n');
-        const previewText = fullText.length > PREVIEW_MAX_CHARS
-          ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
-          : fullText;
+        return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+          
+          // Build a single preview string from blocks (first ~2k chars shown)
+          const fullText = result.blocks.map(b => b.text).join('\n\n');
+          const previewText = fullText.length > PREVIEW_MAX_CHARS
+            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
+            : fullText;
 
         const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
 
@@ -565,6 +556,7 @@ const createServer = () => {
           ],
           structuredContent: result, // still includes result.truncated
         };
+        });
       }
     );
 
@@ -585,15 +577,18 @@ const createServer = () => {
       },
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
-        const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
-        
-        const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
-        const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
-        
-        return {
-          content: [{ type: 'text', text: attachmentText }],
-          structuredContent: result,
-        };
+        return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+          
+          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
+          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+          
+          return {
+            content: [{ type: 'text', text: attachmentText }],
+            structuredContent: result,
+          };
+        });
       }
     );
   }

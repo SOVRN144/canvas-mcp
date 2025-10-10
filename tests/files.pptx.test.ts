@@ -255,8 +255,8 @@ describe('files/extract PPTX', () => {
   it('skips first text run only when title exists', async () => {
     // Test slide with title - should skip first <a:t>
     const slideWithTitle = '<a:t>Title Text</a:t><a:t>Body Text 1</a:t><a:t>Body Text 2</a:t>';
-    // Test slide without title - should keep all <a:t>
-    const slideWithoutTitle = '<a:t>Body Text 1</a:t><a:t>Body Text 2</a:t>';
+    // Test slide with different title - should also skip first <a:t>
+    const slideWithDifferentTitle = '<a:t>Different Title</a:t><a:t>Body Text 3</a:t><a:t>Body Text 4</a:t>';
     
     const mockZip = {
       files: {
@@ -264,7 +264,7 @@ describe('files/extract PPTX', () => {
           async: vi.fn().mockResolvedValue(slideWithTitle)
         },
         'ppt/slides/slide2.xml': {
-          async: vi.fn().mockResolvedValue(slideWithoutTitle)
+          async: vi.fn().mockResolvedValue(slideWithDifferentTitle)
         }
       }
     };
@@ -298,10 +298,12 @@ describe('files/extract PPTX', () => {
     
     // Slide 1 with title: heading should use title, paragraph should have body texts
     expect(blocks[0].text).toBe('Slide 1 — Title Text');
-    expect(blocks[1].text).toContain('Body Text 1 Body Text 2');
+    expect(blocks[1].text).toContain('Body Text 1');
+    expect(blocks[1].text).toContain('Body Text 2');
     
-    // Slide 2 without title: heading generic, paragraph should have ALL texts
-    expect(blocks[2].text).toBe('Slide 2');
-    expect(blocks[3].text).toContain('Body Text 1 Body Text 2');
+    // Slide 2 with different title: heading should use that title, paragraph should have remaining texts
+    expect(blocks[2].text).toBe('Slide 2 — Different Title');
+    expect(blocks[3].text).toContain('Body Text 3');
+    expect(blocks[3].text).toContain('Body Text 4');
   });
 });
