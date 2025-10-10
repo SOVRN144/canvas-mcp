@@ -260,9 +260,6 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
   return results;
 };
 
-const sanitizeFilename = (name: string): string =>
-  name.replace(/[\\/:*?"<>|]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'file';
-
 const buildJsonRpcError = (message: string, id: unknown = null) => ({
   jsonrpc: '2.0',
   error: { code: -32000, message },
