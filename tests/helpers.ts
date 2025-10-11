@@ -1,6 +1,5 @@
 // tests/helpers.ts
 import supertest from 'supertest';
-import type { Response } from 'supertest';
 
 export async function loadAppWithEnv(overrides: Record<string, string> = {}) {
   // Set env first so config snapshots pick it up on import
@@ -16,7 +15,7 @@ export async function loadAppWithEnv(overrides: Record<string, string> = {}) {
   const request = supertest(app);
 
   // Initialize session (MCP contract)
-  const init: Response = await request
+  const init = await request
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .send({
