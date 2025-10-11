@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import axios from 'axios';
-
-// Mock axios before importing http.ts
-vi.mock('axios');
-const mockedAxios = vi.mocked(axios);
+import type { AxiosInstance } from 'axios';
 
 // Set required env vars before importing
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
@@ -22,14 +19,22 @@ describe('list_courses', () => {
     // Mock axios instance methods
     mockAxiosInstance = {
       get: vi.fn(),
+      post: vi.fn(),
+      put: vi.fn(),
+      delete: vi.fn(),
+      interceptors: {
+        request: { use: vi.fn() },
+        response: { use: vi.fn() }
+      },
       defaults: {
-        baseURL: 'https://example.canvas.test'
+        baseURL: 'https://example.canvas.test',
+        headers: { common: {} }
       }
-    };
+    } as unknown as AxiosInstance;
 
     // Mock axios.create to return our mock instance
-    mockedAxios.create.mockReturnValue(mockAxiosInstance);
-    mockedAxios.isAxiosError.mockImplementation((error: any) => !!error?.isAxiosError);
+    vi.spyOn(axios, 'create').mockReturnValue(mockAxiosInstance);
+    vi.spyOn(axios, 'isAxiosError').mockImplementation((error: any) => !!error?.isAxiosError);
 
     // Dynamically import after mocking
     const httpModule = await import('../src/http.js');
