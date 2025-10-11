@@ -2,6 +2,8 @@
 import axios from 'axios';
 import { config } from './config.js';
 import logger from './logger.js';
+// TODO(strict): OcrMode type imported for future use
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import type { OcrMode } from './types.js';
 
 export interface OcrRequest {

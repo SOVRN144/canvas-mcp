@@ -19,6 +19,8 @@ export function sanitizeHtmlSafe(input: string, opts?: Partial<sanitizeHtml.IOpt
     },
     allowedSchemes: ['http','https','mailto'],
     transformTags: {
+      // TODO(strict): tagName parameter required by sanitize-html API but not used in this transform
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       a: (tagName, attribs) => {
         const rel = attribs.rel?.toLowerCase() || '';
         const set = new Set(rel.split(/\s+/).filter(Boolean));
