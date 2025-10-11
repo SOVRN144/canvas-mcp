@@ -6,9 +6,6 @@ process.env.DISABLE_HTTP_LISTEN = '1';
 import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
 
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-
 // Mock axios
 const get = vi.fn();
 const create = vi.fn(() => ({ get }));

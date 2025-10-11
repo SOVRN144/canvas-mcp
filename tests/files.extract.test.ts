@@ -108,9 +108,6 @@ describe('files/extract (extract_file)', () => {
 
     // Assert JSON-RPC result
     expect(body?.result).toBeTruthy();
-    if (!body.result.structuredContent) {
-      console.error('Response body:', JSON.stringify(body, null, 2));
-    }
     expect(body.result.structuredContent).toBeTruthy();
     const sc = body.result.structuredContent;
 
