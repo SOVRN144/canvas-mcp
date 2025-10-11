@@ -9,3 +9,11 @@ updates:
       - "SOVRN144"
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      dev-dependencies:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "prettier"
+          - "typescript"
+          - "vitest"
