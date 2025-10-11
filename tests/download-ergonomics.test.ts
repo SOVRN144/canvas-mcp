@@ -73,7 +73,13 @@ describe('download_file ergonomics', () => {
         jsonrpc: '2.0', 
         id: 3, 
         method: 'tools/call', 
-        params: { name: 'download_file', arguments: { fileId } } 
+        params: { 
+          name: 'download_file', 
+          arguments: { 
+            fileId,
+            maxSize: 100 * 1024 * 1024  // Set higher than file size
+          } 
+        } 
       });
 
     expect(res.status).toBe(200);

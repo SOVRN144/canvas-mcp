@@ -670,54 +670,58 @@ const createServer = () => {
             const needsOcr = ocr === 'force' || isImageOnly(fullText);
             
             if (needsOcr) {
+              // Early OCR availability check
               if (config.ocrProvider !== 'webhook') {
                 throw new Error(ocrDisabledHint());
+              }
+              if (!config.ocrWebhookUrl) {
+                throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
+              }
+              
+              // Download file for OCR
+              const { getCanvasFileMeta } = await import('./files.js');
+              const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+              
+              // Get file buffer
+              const axios = (await import('axios')).default;
+              const downloadResponse = await axios.get(fileMeta.url, {
+                responseType: 'arraybuffer',
+                headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
+              });
+              const buffer = Buffer.from(downloadResponse.data);
+              const dataBase64 = buffer.toString('base64');
+              
+              // Perform OCR
+              const ocrResult = await performOcr({
+                mime: 'application/pdf',
+                dataBase64,
+                languages: ocrLanguages,
+                maxPages: maxOcrPages,
+              });
+              
+              pagesOcred = ocrResult.pagesOcred;
+              
+              if (ocr === 'force' || !fullText.trim()) {
+                // Use OCR text exclusively
+                const truncated = truncate(ocrResult.text, maxChars);
+                result = {
+                  ...result,
+                  blocks: [{ type: 'paragraph', text: truncated.text }],
+                  charCount: truncated.text.length,
+                  truncated: truncated.truncated,
+                };
+                extractSource = 'ocr';
               } else {
-                // Download file for OCR
-                const { getCanvasFileMeta } = await import('./files.js');
-                const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
-                
-                // Get file buffer
-                const axios = (await import('axios')).default;
-                const downloadResponse = await axios.get(fileMeta.url, {
-                  responseType: 'arraybuffer',
-                  headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
-                });
-                const buffer = Buffer.from(downloadResponse.data);
-                const dataBase64 = buffer.toString('base64');
-                
-                // Perform OCR
-                const ocrResult = await performOcr({
-                  mime: 'application/pdf',
-                  dataBase64,
-                  languages: ocrLanguages,
-                  maxPages: maxOcrPages,
-                });
-                
-                pagesOcred = ocrResult.pagesOcred;
-                
-                if (ocr === 'force' || !fullText.trim()) {
-                  // Use OCR text exclusively
-                  const truncated = truncate(ocrResult.text, maxChars);
-                  result = {
-                    ...result,
-                    blocks: [{ type: 'paragraph', text: truncated.text }],
-                    charCount: truncated.text.length,
-                    truncated: truncated.truncated,
-                  };
-                  extractSource = 'ocr';
-                } else {
-                  // Mix native + OCR
-                  const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
-                  const truncated = truncate(combined, maxChars);
-                  result = {
-                    ...result,
-                    blocks: [{ type: 'paragraph', text: truncated.text }],
-                    charCount: truncated.text.length,
-                    truncated: truncated.truncated,
-                  };
-                  extractSource = 'mixed';
-                }
+                // Mix native + OCR
+                const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
+                const truncated = truncate(combined, maxChars);
+                result = {
+                  ...result,
+                  blocks: [{ type: 'paragraph', text: truncated.text }],
+                  charCount: truncated.text.length,
+                  truncated: truncated.truncated,
+                };
+                extractSource = 'mixed';
               }
             }
           } else if (isPdf && ocr === 'off' && isImageOnly(fullText)) {
@@ -777,8 +781,13 @@ const createServer = () => {
           const name = display_name || filename || `file-${id}`;
           const sizeMB = (size / 1024 / 1024).toFixed(1);
           
+          // Check maxSize before downloading
+          if (size > maxSize) {
+            throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${(maxSize / 1024 / 1024).toFixed(1)} MB)`);
+          }
+          
           // Check if we should inline or return URL
-          if (size <= config.downloadMaxInlineBytes && size <= maxSize) {
+          if (size <= config.downloadMaxInlineBytes) {
             // Small file: inline as base64
             const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
             

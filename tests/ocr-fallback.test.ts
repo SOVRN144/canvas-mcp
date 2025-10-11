@@ -41,6 +41,11 @@ describe('extract_file OCR', () => {
       .get('/files/999/download')
       .query(true)
       .reply(200, pdfBuffer);
+    
+    nock(CANVAS)
+      .get('/files/999/download')
+      .query(true)
+      .reply(200, pdfBuffer);
 
     const u = new URL(OCR);
     nock(u.origin)
@@ -62,7 +67,8 @@ describe('extract_file OCR', () => {
           name: 'extract_file',
           arguments: {
             fileId: 999,
-            ocr: 'auto',
+            ocr: 'force',  // Force OCR to ensure webhook is called
+            maxChars: 2000,
           },
         },
       });
