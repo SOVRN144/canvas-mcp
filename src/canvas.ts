@@ -28,7 +28,7 @@ export async function getAssignment(
   assignmentId: number
 ): Promise<CanvasAssignment> {
   try {
-    const response = await canvasClient.get(
+    const response = await canvasClient.get<CanvasAssignment>(
       `/api/v1/courses/${courseId}/assignments/${assignmentId}`
     );
     return response.data;

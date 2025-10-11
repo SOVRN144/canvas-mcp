@@ -3,7 +3,6 @@ import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
 import { isMain } from './util/isMain.js';
 import axios, { AxiosInstance, AxiosHeaders } from 'axios';
-import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -13,10 +12,8 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
-import { getAssignment, type CanvasAssignment } from './canvas.js';
+import { getAssignment } from './canvas.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
-import { performOcr, isImageOnly, ocrDisabledHint } from './ocr.js';
-import type { OcrMode, FileAttachmentContentItem } from './types.js';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
@@ -667,6 +664,9 @@ const createServer = () => {
           
           const fullText = result.blocks.map(b => b.text).join('\n\n');
           const isPdf = result.file.contentType === 'application/pdf';
+          
+          // Lazy-load OCR helpers only when needed to satisfy noUnusedLocals and keep cold path light
+          const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
           
           // Handle OCR logic
           if (isPdf && ocr !== 'off') {

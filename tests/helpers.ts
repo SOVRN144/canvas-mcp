@@ -1,5 +1,4 @@
 // tests/helpers.ts
-import type { SuperTest, Test } from 'supertest';
 import supertest from 'supertest';
 
 export async function loadAppWithEnv(overrides: Record<string, string> = {}) {
@@ -13,7 +12,7 @@ export async function loadAppWithEnv(overrides: Record<string, string> = {}) {
   // Import app AFTER env is set
   const { app } = await import('../src/http.js');
 
-  const request: SuperTest<Test> = supertest(app);
+  const request = supertest(app);
 
   // Initialize session (MCP contract)
   const init = await request

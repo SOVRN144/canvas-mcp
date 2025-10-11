@@ -1,6 +1,6 @@
 // src/util/isMain.ts
-import { fileURLToPath } from 'url';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 /** True when the current module is the entrypoint (ESM-safe). */
 export function isMain(metaUrl: string): boolean {

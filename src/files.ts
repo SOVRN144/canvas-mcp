@@ -1,8 +1,8 @@
 import axios, { type AxiosInstance } from 'axios';
-import logger from './logger.js';
-import mammoth from 'mammoth';
 import JSZip from 'jszip';
+import mammoth from 'mammoth';
 import { getSanitizedCanvasToken } from './config.js';
+import logger from './logger.js';
 
 /**
  * Throws a standardized error for file processing failures.
@@ -88,7 +88,7 @@ type DownloadResult = {
  */
 export async function getCanvasFileMeta(canvasClient: AxiosInstance, fileId: number): Promise<CanvasFile> {
   try {
-    const response = await canvasClient.get(`/api/v1/files/${fileId}`);
+    const response = await canvasClient.get<CanvasFile>(`/api/v1/files/${fileId}`);
     return response.data;
   } catch (error) {
     logger.error('Failed to get Canvas file metadata', { fileId, error: String(error) });
@@ -118,8 +118,8 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       maxRedirects: 5,
     });
 
-    const buffer = Buffer.from(response.data);
-    const contentType = response.headers['content-type'] || fileMeta.content_type || 'application/octet-stream';
+    const buffer = Buffer.from(response.data as ArrayBuffer);
+    const contentType = (response.headers['content-type'] as string | undefined) || fileMeta.content_type || 'application/octet-stream';
     
     // Validate downloaded size and warn on mismatch
     const tolerance = 1024; // 1KB
@@ -208,7 +208,8 @@ async function extractDocxText(buffer: Buffer, fileId: number): Promise<string> 
  */
 async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileContentBlock[]> {
   try {
-    const zip = await JSZip.loadAsync(buffer);
+    // Buffer extends Uint8Array, which JSZip accepts
+    const zip = await JSZip.loadAsync(buffer as Uint8Array);
     const blocks: FileContentBlock[] = [];
     
     // Extract slide content from PPTX structure

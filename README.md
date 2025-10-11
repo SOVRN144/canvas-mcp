@@ -5,6 +5,20 @@
 
 Minimal MCP server (Streamable HTTP) with an `echo` tool.
 
+## Repo Health
+
+This repository maintains several health and security checks:
+
+- **Lint**: ESLint with TypeScript, import ordering, and security rules
+- **Typecheck**: TypeScript strict mode with additional safety flags
+- **Tests**: Vitest with coverage reporting
+- **Coverage**: Test coverage tracked in CI
+- **CodeQL**: GitHub's security analysis for JavaScript/TypeScript
+- **Scorecards**: OSSF Scorecard for supply chain security
+- **Dependabot**: Automated dependency updates (weekly)
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development workflow.
+
 ## Dev
 ```bash
 npm i
