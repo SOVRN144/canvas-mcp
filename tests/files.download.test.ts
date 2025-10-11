@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
 process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';

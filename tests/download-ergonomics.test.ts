@@ -113,17 +113,17 @@ describe('download_file ergonomics', () => {
           name: 'download_file',
           arguments: {
             fileId,
-            maxSize: 100 * 1024 * 1024, // Set higher than file size
+            // Don't set maxSize - let it use default, which will be checked against config
           },
         },
       });
 
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
-    expect(res.body.result).toBeDefined();
-    if (!res.body.result?.structuredContent) {
+    if (!res.body.result) {
       console.error('Response body:', JSON.stringify(res.body, null, 2));
     }
+    expect(res.body.result).toBeDefined();
     const file = res.body.result.structuredContent.file;
     expect(file.url).toMatch(/^https:\/\/canvas\.example\.com\/files\/\d+\/download/);
     expect(file.dataBase64).toBeUndefined();

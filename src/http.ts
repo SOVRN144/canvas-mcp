@@ -777,32 +777,13 @@ const createServer = () => {
           const name = display_name || filename || `file-${id}`;
           const sizeMB = (size / 1024 / 1024).toFixed(1);
           
-          // Check maxSize before downloading
-          if (size > maxSize) {
-            throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${(maxSize / 1024 / 1024).toFixed(1)} MB)`);
-          }
-          
           // Check if we should inline or return URL
-          if (size <= config.downloadMaxInlineBytes) {
-            // Small file: inline as base64 - reuse fileMeta to avoid duplicate fetch
-            const result = await downloadFileAsBase64(canvasClient, fileId, maxSize, fileMeta);
+          if (size > config.downloadMaxInlineBytes) {
+            // Large file: return URL only (no download, no maxSize check)
+            if (!url) {
+              throw new Error(`File ${id}: Signed download URL missing from Canvas metadata`);
+            }
             
-            const attachmentText = `Attached file: ${name} (${sizeMB} MB, ${content_type})`;
-            
-            return {
-              content: [{ type: 'text', text: attachmentText }],
-              structuredContent: {
-                file: {
-                  id,
-                  name,
-                  contentType: content_type,
-                  size,
-                  dataBase64: result.file.dataBase64,
-                },
-              },
-            };
-          } else {
-            // Large file: return URL only
             const attachmentText = `Attached file (via URL): ${name} (${sizeMB} MB, ${content_type})`;
             
             // Redact query params from URL for logging
@@ -818,6 +799,29 @@ const createServer = () => {
                   contentType: content_type,
                   size,
                   url, // Full signed URL with query params
+                },
+              },
+            };
+          } else {
+            // Small file: check maxSize, then inline as base64
+            if (size > maxSize) {
+              throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${(maxSize / 1024 / 1024).toFixed(1)} MB)`);
+            }
+            
+            // Reuse fileMeta to avoid duplicate fetch
+            const result = await downloadFileAsBase64(canvasClient, fileId, maxSize, fileMeta);
+            
+            const attachmentText = `Attached file: ${name} (${sizeMB} MB, ${content_type})`;
+            
+            return {
+              content: [{ type: 'text', text: attachmentText }],
+              structuredContent: {
+                file: {
+                  id,
+                  name,
+                  contentType: content_type,
+                  size,
+                  dataBase64: result.file.dataBase64,
                 },
               },
             };
