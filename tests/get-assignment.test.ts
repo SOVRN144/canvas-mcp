@@ -1,33 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import nock from 'nock';
-import request from 'supertest';
-import { app } from '../src/http.js';
+import { loadAppWithEnv } from './helpers.js';
 
 const CANVAS = process.env.CANVAS_BASE_URL || 'https://canvas.example.com';
 
 describe('get_assignment', () => {
+  let request: any;
   let sessionId: string;
 
   beforeEach(async () => {
     nock.cleanAll();
-    
-    // Initialize session
-    nock(CANVAS).get('/api/v1/courses').query(true).reply(200, []);
-    
-    const initResponse = await request(app)
-      .post('/mcp')
-      .send({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: { name: 'test', version: '1.0.0' },
-        },
-      });
-    
-    sessionId = initResponse.headers['mcp-session-id'];
+    ({ request, sessionId } = await loadAppWithEnv({
+      CANVAS_BASE_URL: CANVAS,
+      CANVAS_TOKEN: 'test-token'
+    }));
   });
 
   afterEach(() => {
@@ -47,8 +33,9 @@ describe('get_assignment', () => {
         due_at: '2024-12-31T23:59:59Z',
       });
 
-    const response = await request(app)
+    const response = await request
       .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
       .send({
         jsonrpc: '2.0',
@@ -86,8 +73,9 @@ describe('get_assignment', () => {
         due_at: null,
       });
 
-    const response = await request(app)
+    const response = await request
       .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
       .send({
         jsonrpc: '2.0',

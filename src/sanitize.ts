@@ -57,3 +57,24 @@ export function truncate(input: string, maxChars: number) {
   const slice = text.slice(0, Math.max(0, maxChars - 1)).trimEnd();
   return { text: `${slice}…`, truncated: true };
 }
+
+/** Sanitize HTML with character limit, avoiding broken tags. */
+export function sanitizeHtmlWithLimit(input: string, maxChars: number) {
+  if (!Number.isFinite(maxChars) || maxChars <= 0) {
+    return { html: sanitizeHtmlSafe(input), truncated: false };
+  }
+  let remaining = maxChars;
+  const html = sanitizeHtmlSafe(input, {
+    textFilter: (text) => {
+      if (remaining <= 0) return '';
+      if (text.length <= remaining) {
+        remaining -= text.length;
+        return text;
+      }
+      const slice = text.slice(0, Math.max(0, remaining - 1)).trimEnd();
+      remaining = 0;
+      return `${slice}…`;
+    }
+  });
+  return { html, truncated: remaining === 0 };
+}

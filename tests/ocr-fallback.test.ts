@@ -1,42 +1,26 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import nock from 'nock';
-import request from 'supertest';
-import { app } from '../src/http.js';
+import { loadAppWithEnv } from './helpers.js';
 
 const CANVAS = process.env.CANVAS_BASE_URL || 'https://canvas.example.com';
 const OCR = process.env.OCR_WEBHOOK_URL || 'https://ocr.example.com/extract';
 
 describe('extract_file OCR', () => {
+  let request: any;
   let sessionId: string;
 
   beforeEach(async () => {
     nock.cleanAll();
-    process.env.OCR_PROVIDER = 'webhook';
-    process.env.OCR_WEBHOOK_URL = OCR;
-    
-    // Initialize session
-    nock(CANVAS).get('/api/v1/courses').query(true).reply(200, []);
-    
-    const initResponse = await request(app)
-      .post('/mcp')
-      .send({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: { name: 'test', version: '1.0.0' },
-        },
-      });
-    
-    sessionId = initResponse.headers['mcp-session-id'];
+    ({ request, sessionId } = await loadAppWithEnv({
+      OCR_PROVIDER: 'webhook',
+      OCR_WEBHOOK_URL: OCR,
+      CANVAS_BASE_URL: CANVAS,
+      CANVAS_TOKEN: 'test-token'
+    }));
   });
 
   afterEach(() => {
     nock.cleanAll();
-    delete process.env.OCR_PROVIDER;
-    delete process.env.OCR_WEBHOOK_URL;
   });
 
   it('ocr:auto triggers webhook when native text empty', async () => {
@@ -50,22 +34,25 @@ describe('extract_file OCR', () => {
         filename: 'image-scan.pdf',
         size: pdfBuffer.length,
         content_type: 'application/pdf',
-        url: 'https://canvas.example.com/files/999/download',
+        url: `${CANVAS}/files/999/download?verifier=abc`,
       });
 
-    nock('https://canvas.example.com')
+    nock(CANVAS)
       .get('/files/999/download')
+      .query(true)
       .reply(200, pdfBuffer);
 
-    nock(OCR)
-      .post('/extract')
+    const u = new URL(OCR);
+    nock(u.origin)
+      .post(u.pathname)
       .reply(200, {
         text: 'OCR extracted text from image PDF',
         pagesOcred: [1, 2],
       });
 
-    const response = await request(app)
+    const response = await request
       .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
       .send({
         jsonrpc: '2.0',
@@ -88,8 +75,6 @@ describe('extract_file OCR', () => {
   });
 
   it('ocr:off returns helpful hint for image-only PDF', async () => {
-    process.env.OCR_PROVIDER = 'none';
-    
     const pdfBuffer = Buffer.from('mock-pdf-data');
     
     nock(CANVAS)
@@ -100,15 +85,17 @@ describe('extract_file OCR', () => {
         filename: 'scan.pdf',
         size: pdfBuffer.length,
         content_type: 'application/pdf',
-        url: 'https://canvas.example.com/files/888/download',
+        url: `${CANVAS}/files/888/download?verifier=xyz`,
       });
 
-    nock('https://canvas.example.com')
+    nock(CANVAS)
       .get('/files/888/download')
+      .query(true)
       .reply(200, pdfBuffer);
 
-    const response = await request(app)
+    const response = await request
       .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
       .send({
         jsonrpc: '2.0',

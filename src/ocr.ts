@@ -28,8 +28,11 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
   }
 
   try {
+    const u = new URL(config.ocrWebhookUrl);
+    const redactedUrl = `${u.origin}${u.pathname}`;
+    
     logger.info('Sending OCR request to webhook', {
-      url: config.ocrWebhookUrl,
+      url: redactedUrl,
       mime: request.mime,
       languages: request.languages,
       maxPages: request.maxPages,
@@ -54,8 +57,11 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
 
     return response.data;
   } catch (error) {
+    const u = new URL(config.ocrWebhookUrl);
+    const redactedUrl = `${u.origin}${u.pathname}`;
+    
     logger.error('OCR webhook request failed', {
-      url: config.ocrWebhookUrl,
+      url: redactedUrl,
       error: String(error),
     });
     throw new Error(`OCR extraction failed: ${error instanceof Error ? error.message : String(error)}`);

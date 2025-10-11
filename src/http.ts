@@ -11,12 +11,15 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
-import { config, getSanitizedCanvasToken } from './config.js';
+import { config, getSanitizedCanvasToken, validateConfig } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 import { getAssignment, type CanvasAssignment } from './canvas.js';
-import { sanitizeHtmlSafe, htmlToText, truncate } from './sanitize.js';
+import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
 import { performOcr, isImageOnly, ocrDisabledHint } from './ocr.js';
 import type { OcrMode, FileAttachmentContentItem } from './types.js';
+
+// Validate config early to fail fast on misconfiguration
+validateConfig();
 
 const IS_MAIN = isMain(import.meta.url);
 
@@ -566,13 +569,10 @@ const createServer = () => {
           const assignment = await getAssignment(canvasClient, courseId, assignmentId);
           
           const description = assignment.description || '';
-          let processedContent: string;
           
           if (mode === 'html') {
-            // Sanitize HTML and truncate
-            const sanitized = sanitizeHtmlSafe(description);
-            const result = maxChars ? truncate(sanitized, maxChars) : { text: sanitized, truncated: false };
-            processedContent = result.text;
+            // Sanitize HTML with safe truncation
+            const { html, truncated } = sanitizeHtmlWithLimit(description, maxChars ?? 100_000);
             
             return {
               content: [{
@@ -589,8 +589,8 @@ const createServer = () => {
                   name: assignment.name,
                   pointsPossible: assignment.points_possible ?? null,
                   dueAt: assignment.due_at ?? null,
-                  html: processedContent,
-                  truncated: result.truncated,
+                  html,
+                  truncated,
                 },
               },
             };
@@ -599,7 +599,6 @@ const createServer = () => {
             const sanitized = sanitizeHtmlSafe(description);
             const plainText = htmlToText(sanitized);
             const result = maxChars ? truncate(plainText, maxChars) : { text: plainText, truncated: false };
-            processedContent = result.text;
             
             return {
               content: [{
@@ -616,7 +615,7 @@ const createServer = () => {
                   name: assignment.name,
                   pointsPossible: assignment.points_possible ?? null,
                   dueAt: assignment.due_at ?? null,
-                  text: processedContent,
+                  text: result.text,
                   truncated: result.truncated,
                 },
               },
