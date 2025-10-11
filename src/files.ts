@@ -208,9 +208,8 @@ async function extractDocxText(buffer: Buffer, fileId: number): Promise<string> 
  */
 async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileContentBlock[]> {
   try {
-    // TODO(strict): Buffer is compatible with jszip but strict TS doesn't recognize the type compatibility
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const zip = await JSZip.loadAsync(buffer as any);
+    // Buffer extends Uint8Array, which JSZip accepts
+    const zip = await JSZip.loadAsync(buffer as Uint8Array);
     const blocks: FileContentBlock[] = [];
     
     // Extract slide content from PPTX structure
