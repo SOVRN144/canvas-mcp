@@ -10,7 +10,7 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier -w .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "audit:ci": "npm audit --audit-level=high || true",
+    "audit:ci": "npm audit --audit-level=high",
     "smoke:local": "DISABLE_HTTP_LISTEN=1 node --import tsx/esm src/smoke.local.ts",
     "smoke:public": "bash scripts/smoke-public.sh"
   },
