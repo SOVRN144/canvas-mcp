@@ -3,9 +3,6 @@ import cors from 'cors';
 import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
 import { isMain } from './util/isMain.js';
 import axios, { AxiosInstance, AxiosHeaders } from 'axios';
-// TODO(strict): fs import used conditionally, may be needed for future features
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -15,15 +12,8 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
-// TODO(strict): CanvasAssignment type used for documentation/future typing
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { getAssignment, type CanvasAssignment } from './canvas.js';
+import { getAssignment } from './canvas.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
-// TODO(strict): These imports used conditionally based on OCR config
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { performOcr, isImageOnly, ocrDisabledHint } from './ocr.js';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import type { OcrMode, FileAttachmentContentItem } from './types.js';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
