@@ -2,6 +2,7 @@ import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
 
 // ---- Env must be set BEFORE importing the app ----
+process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
 process.env.CANVAS_TOKEN = 'x';
 process.env.MAX_EXTRACT_MB = '15';
@@ -18,7 +19,7 @@ vi.mock('axios', () => ({
 // Mock PDF extraction so tests don't depend on real parsers
 vi.mock('pdf-parse', () => ({
   default: async (_buf: Buffer) => ({
-    text: 'Slide 1: Intro\nAcoustics is the science of sound.',
+    text: 'Slide 1: Intro\nAcoustics is the science of sound. This is a longer text to ensure it passes the image-only detection threshold.',
   }),
 }));
 

@@ -11,8 +11,15 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
-import { config, getSanitizedCanvasToken } from './config.js';
+import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
+import { getAssignment, type CanvasAssignment } from './canvas.js';
+import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
+import { performOcr, isImageOnly, ocrDisabledHint } from './ocr.js';
+import type { OcrMode, FileAttachmentContentItem } from './types.js';
+
+// Validate config early to fail fast on misconfiguration
+validateConfig();
 
 const IS_MAIN = isMain(import.meta.url);
 
@@ -351,10 +358,21 @@ const ListFilesInputShape = {
 } as const;
 const ListFilesInput = z.object(ListFilesInputShape);
 
+const GetAssignmentInputShape = {
+  assignmentId: z.number().describe('Canvas assignment id'),
+  courseId: z.number().describe('Canvas course id (preferred if known)'),
+  mode: z.enum(['html', 'text']).optional().default('text'),
+  maxChars: z.number().int().positive().max(100_000).optional(),
+} as const;
+const GetAssignmentInput = z.object(GetAssignmentInputShape).strict();
+
 const ExtractFileInputShape = {
   fileId: z.number(),
   mode: z.enum(['text', 'outline', 'slides']).optional(),
   maxChars: z.number().int().positive().max(100_000).optional(),
+  ocr: z.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
+  ocrLanguages: z.array(z.string()).optional().default(['eng']),
+  maxOcrPages: z.number().int().min(1).max(200).optional().default(20),
 } as const;
 const ExtractFileInput = z.object(ExtractFileInputShape);
 
@@ -528,11 +546,96 @@ const createServer = () => {
     );
 
     /**
+     * Get assignment details tool
+     * Fetches Canvas assignment with sanitized HTML or plain text description
+     * @param assignmentId Canvas assignment ID
+     * @param courseId Canvas course ID
+     * @param mode Return format: html (sanitized) or text (plain)
+     * @param maxChars Maximum characters to return
+     * @returns Assignment details with sanitized content
+     * @throws If assignment not found or Canvas API fails
+     */
+    addTool(
+      'get_assignment',
+      {
+        title: 'Get assignment details',
+        description: 'Fetch Canvas assignment with sanitized HTML or plain text description',
+        inputSchema: GetAssignmentInputShape,
+      },
+      async (args) => {
+        const { assignmentId, courseId, mode = 'text', maxChars } = GetAssignmentInput.parse(args ?? {});
+        const limit = Number.isFinite(maxChars) ? maxChars! : DEFAULTS.assignmentMaxChars;
+        
+        return withCanvasErrors(async () => {
+          const canvasClient = requireCanvasClient();
+          const assignment = await getAssignment(canvasClient, courseId, assignmentId);
+          
+          const description = assignment.description || '';
+          
+          if (mode === 'html') {
+            // Sanitize HTML with safe truncation
+            const { html, truncated } = sanitizeHtmlWithLimit(description, limit);
+            
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  name: assignment.name,
+                  pointsPossible: assignment.points_possible ?? null,
+                  dueAt: assignment.due_at ?? null,
+                }).substring(0, 300),
+              }],
+              structuredContent: {
+                assignment: {
+                  id: assignment.id,
+                  name: assignment.name,
+                  pointsPossible: assignment.points_possible ?? null,
+                  dueAt: assignment.due_at ?? null,
+                  html,
+                  truncated,
+                },
+              },
+            };
+          } else {
+            // Convert to text and truncate
+            const sanitized = sanitizeHtmlSafe(description);
+            const plainText = htmlToText(sanitized);
+            const result = truncate(plainText, limit);
+            
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  name: assignment.name,
+                  pointsPossible: assignment.points_possible ?? null,
+                  dueAt: assignment.due_at ?? null,
+                }).substring(0, 300),
+              }],
+              structuredContent: {
+                assignment: {
+                  id: assignment.id,
+                  name: assignment.name,
+                  pointsPossible: assignment.points_possible ?? null,
+                  dueAt: assignment.due_at ?? null,
+                  text: result.text,
+                  truncated: result.truncated,
+                },
+              },
+            };
+          }
+        });
+      }
+    );
+
+    /**
      * Extract text from Canvas file tool
      * Downloads and extracts readable text from Canvas files (PDF/DOCX/PPTX/TXT)
      * @param fileId Canvas file ID to extract from
      * @param mode Extraction mode (text, outline, slides)
      * @param maxChars Maximum characters to return
+     * @param ocr OCR mode: off, auto, or force
+     * @param ocrLanguages Languages for OCR (default: ['eng'])
+     * @param maxOcrPages Maximum pages to OCR (default: 20)
      * @returns Structured content with text blocks and metadata
      * @throws If file is too large, unsupported type, or Canvas API fails
      */
@@ -540,30 +643,111 @@ const createServer = () => {
       'extract_file',
       {
         title: 'Extract text from Canvas file',
-        description: 'Download and extract text from a Canvas file (PDF/DOCX/PPTX/TXT)',
+        description: 'Download and extract text from a Canvas file (PDF/DOCX/PPTX/TXT) with optional OCR',
         inputSchema: ExtractFileInputShape,
       },
       async (args) => {
-        const { fileId, mode = 'text', maxChars = 50_000 } = ExtractFileInput.parse(args ?? {});
+        const { 
+          fileId, 
+          mode = 'text', 
+          maxChars,
+          ocr = 'auto',
+          ocrLanguages = ['eng'],
+          maxOcrPages = 20,
+        } = ExtractFileInput.parse(args ?? {});
+        const limit = Number.isFinite(maxChars) ? maxChars! : DEFAULTS.extractMaxChars;
+        
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
-          const result = await extractFileContent(canvasClient, fileId, mode, maxChars);
           
-          // Build a single preview string from blocks (first ~2k chars shown)
+          // Try native extraction first
+          let result = await extractFileContent(canvasClient, fileId, mode, limit);
+          let extractSource: 'native' | 'ocr' | 'mixed' = 'native';
+          let pagesOcred: number[] | undefined;
+          
           const fullText = result.blocks.map(b => b.text).join('\n\n');
-          const previewText = fullText.length > PREVIEW_MAX_CHARS
-            ? fullText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'  // simple, safe-ish trim with ellipsis
-            : fullText;
+          const isPdf = result.file.contentType === 'application/pdf';
+          
+          // Handle OCR logic
+          if (isPdf && ocr !== 'off') {
+            const needsOcr = ocr === 'force' || isImageOnly(fullText);
+            
+            if (needsOcr) {
+              // Early OCR availability check
+              if (config.ocrProvider !== 'webhook') {
+                throw new Error(ocrDisabledHint());
+              }
+              if (!config.ocrWebhookUrl) {
+                throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
+              }
+              
+              // Download file for OCR using URL from extract result
+              const { default: axios } = await import('axios');
+              const downloadResponse = await axios.get(result.file.url!, {
+                responseType: 'arraybuffer',
+                headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
+              });
+              const buffer = Buffer.from(downloadResponse.data);
+              const dataBase64 = buffer.toString('base64');
+              
+              // Perform OCR
+              const ocrResult = await performOcr({
+                mime: 'application/pdf',
+                dataBase64,
+                languages: ocrLanguages,
+                maxPages: maxOcrPages,
+              });
+              
+              pagesOcred = ocrResult.pagesOcred;
+              
+              if (ocr === 'force' || !fullText.trim()) {
+                // Use OCR text exclusively
+                const truncated = truncate(ocrResult.text, limit);
+                result = {
+                  ...result,
+                  blocks: [{ type: 'paragraph', text: truncated.text }],
+                  charCount: truncated.text.length,
+                  truncated: truncated.truncated,
+                };
+                extractSource = 'ocr';
+              } else {
+                // Mix native + OCR
+                const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
+                const truncated = truncate(combined, limit);
+                result = {
+                  ...result,
+                  blocks: [{ type: 'paragraph', text: truncated.text }],
+                  charCount: truncated.text.length,
+                  truncated: truncated.truncated,
+                };
+                extractSource = 'mixed';
+              }
+            }
+          } else if (isPdf && ocr === 'off' && isImageOnly(fullText)) {
+            throw new Error(ocrDisabledHint());
+          }
+          
+          // Build preview
+          const previewText = result.blocks.map(b => b.text).join('\n\n');
+          const preview = previewText.length > PREVIEW_MAX_CHARS
+            ? previewText.substring(0, PREVIEW_MAX_CHARS).trimEnd() + '…'
+            : previewText;
 
-        const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
+          const summary = `Extracted ${result.charCount} characters from ${result.file.name} (${Math.round(result.file.size / 1024)}KB)${result.truncated ? ' [truncated]' : ''}`;
 
-        return {
-          content: [
-            // Don't append an extra "[...]"—the ellipsis + structured truncated flag are enough
-            { type: 'text', text: `${summary}\n\n${previewText}` },
-          ],
-          structuredContent: result, // still includes result.truncated
-        };
+          return {
+            content: [
+              { type: 'text', text: `${summary}\n\n${preview}` },
+            ],
+            structuredContent: {
+              ...result,
+              meta: {
+                source: extractSource,
+                ...(pagesOcred ? { pagesOcred } : {}),
+                truncated: result.truncated,
+              },
+            },
+          };
         });
       }
     );
@@ -571,31 +755,84 @@ const createServer = () => {
     /**
      * Download Canvas file as attachment tool
      * Downloads Canvas files as base64 attachments with size limits
+     * Small files are inlined; large files return URL only
      * @param fileId Canvas file ID to download
      * @param maxSize Maximum file size in bytes
-     * @returns Base64-encoded file data for chat attachment
+     * @returns Base64-encoded file data for chat attachment (small) or URL (large)
      * @throws If file exceeds size limit or download fails
      */
     addTool(
       'download_file',
       {
         title: 'Download Canvas file as attachment',
-        description: 'Download a Canvas file by id and return a base64 attachment (with optional size cap)',
+        description: 'Download a Canvas file by id; small files inlined as base64, large files return URL',
         inputSchema: DownloadFileInputShape,
       },
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
-          const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+          const { getCanvasFileMeta } = await import('./files.js');
           
-          const sizeMB = (result.file.size / 1024 / 1024).toFixed(1);
-          const attachmentText = `Attached file: ${result.file.name} (${sizeMB} MB, ${result.file.contentType})`;
+          // Fetch file metadata once
+          const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+          const { id, display_name, filename, size, content_type, url } = fileMeta;
+          const name = display_name || filename || `file-${id}`;
+          const sizeMB = (size / 1024 / 1024).toFixed(1);
           
-          return {
-            content: [{ type: 'text', text: attachmentText }],
-            structuredContent: result,
-          };
+          // Check if we should inline or return URL
+          if (size > config.downloadMaxInlineBytes) {
+            // Large file: return URL only (no download, no maxSize check)
+            if (!url) {
+              throw new Error(`File ${id}: Signed download URL missing from Canvas metadata`);
+            }
+            
+            const attachmentText = `Attached file (via URL): ${name} (${sizeMB} MB, ${content_type})`;
+            
+            // Redact query params from URL for logging
+            const urlForLog = url.split('?')[0];
+            logger.info('Returning large file URL', { fileId: id, size, urlPreview: urlForLog });
+            
+            return {
+              content: [{ type: 'text', text: attachmentText }],
+              structuredContent: {
+                file: {
+                  id,
+                  name,
+                  contentType: content_type,
+                  size,
+                  url, // Full signed URL with query params
+                },
+              },
+            };
+          } else {
+            // Small file: check maxSize, then inline as base64
+            if (size > maxSize) {
+              const maxMB = (maxSize / 1024 / 1024).toFixed(1);
+              const hint = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'].includes(content_type)
+                ? ' If this is a supported document (PDF, DOCX, PPTX), try the "extract_file" tool to pull text instead.'
+                : '';
+              throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${maxMB} MB).${hint}`);
+            }
+            
+            // Reuse fileMeta to avoid duplicate fetch
+            const result = await downloadFileAsBase64(canvasClient, fileId, maxSize, fileMeta);
+            
+            const attachmentText = `Attached file: ${name} (${sizeMB} MB, ${content_type})`;
+            
+            return {
+              content: [{ type: 'text', text: attachmentText }],
+              structuredContent: {
+                file: {
+                  id,
+                  name,
+                  contentType: content_type,
+                  size,
+                  dataBase64: result.file.dataBase64,
+                },
+              },
+            };
+          }
         });
       }
     );
