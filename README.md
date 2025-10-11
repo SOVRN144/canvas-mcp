@@ -17,6 +17,20 @@ Copy `.env.example` to `.env` and adjust values as needed:
 - `CORS_ALLOW_ORIGINS`: comma-separated list of browser origins allowed to call the MCP server. Leave empty to block all browser origins while still allowing CLI clients (no `Origin` header). Do **not** expose `Mcp-Session-Id` to `*`; always use an allowlist for browser-based connectors.
 - `SESSION_TTL_MS`: idle session timeout (in milliseconds). Defaults to 600000 (10 minutes) when unset; idle sessions close automatically once expired.
 
+## Tools
+
+### Text Extraction & Downloads
+- **`extract_file`**: Extract text from Canvas files (PDF, DOCX, PPTX, TXT). Default max characters: **50,000**. Supports optional OCR for image-only PDFs.
+- **`get_assignment`**: Fetch Canvas assignment details with sanitized HTML or plain text description. Default max characters: **100,000**.
+- **`download_file`**: Download Canvas files. Small files (≤10KB by default) are inlined as base64; larger files return a signed URL. If a file exceeds the `maxSize` parameter and is a supported document type, the error message will suggest using `extract_file` instead.
+
+### Canvas Data
+- **`list_courses`**: List all Canvas courses for the authenticated user.
+- **`list_modules`**: List modules and items for a course.
+- **`list_files_from_modules`**: Extract file references from course modules.
+
+All text extraction tools support a `maxChars` parameter to control output length. When not specified, the defaults above apply.
+
 ## Smoke
 ```bash
 H=$(mktemp)

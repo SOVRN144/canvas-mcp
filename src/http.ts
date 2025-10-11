@@ -11,7 +11,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import logger from './logger.js';
-import { config, getSanitizedCanvasToken, validateConfig } from './config.js';
+import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
 import { getAssignment, type CanvasAssignment } from './canvas.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
@@ -563,7 +563,9 @@ const createServer = () => {
         inputSchema: GetAssignmentInputShape,
       },
       async (args) => {
-        const { assignmentId, courseId, mode = 'text', maxChars = 50_000 } = GetAssignmentInput.parse(args ?? {});
+        const { assignmentId, courseId, mode = 'text', maxChars } = GetAssignmentInput.parse(args ?? {});
+        const limit = Number.isFinite(maxChars) ? maxChars! : DEFAULTS.assignmentMaxChars;
+        
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
           const assignment = await getAssignment(canvasClient, courseId, assignmentId);
@@ -572,7 +574,7 @@ const createServer = () => {
           
           if (mode === 'html') {
             // Sanitize HTML with safe truncation
-            const { html, truncated } = sanitizeHtmlWithLimit(description, maxChars ?? 100_000);
+            const { html, truncated } = sanitizeHtmlWithLimit(description, limit);
             
             return {
               content: [{
@@ -598,7 +600,7 @@ const createServer = () => {
             // Convert to text and truncate
             const sanitized = sanitizeHtmlSafe(description);
             const plainText = htmlToText(sanitized);
-            const result = maxChars ? truncate(plainText, maxChars) : { text: plainText, truncated: false };
+            const result = truncate(plainText, limit);
             
             return {
               content: [{
@@ -648,17 +650,18 @@ const createServer = () => {
         const { 
           fileId, 
           mode = 'text', 
-          maxChars = 50_000,
+          maxChars,
           ocr = 'auto',
           ocrLanguages = ['eng'],
           maxOcrPages = 20,
         } = ExtractFileInput.parse(args ?? {});
+        const limit = Number.isFinite(maxChars) ? maxChars! : DEFAULTS.extractMaxChars;
         
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
           
           // Try native extraction first
-          let result = await extractFileContent(canvasClient, fileId, mode, maxChars);
+          let result = await extractFileContent(canvasClient, fileId, mode, limit);
           let extractSource: 'native' | 'ocr' | 'mixed' = 'native';
           let pagesOcred: number[] | undefined;
           
@@ -699,7 +702,7 @@ const createServer = () => {
               
               if (ocr === 'force' || !fullText.trim()) {
                 // Use OCR text exclusively
-                const truncated = truncate(ocrResult.text, maxChars);
+                const truncated = truncate(ocrResult.text, limit);
                 result = {
                   ...result,
                   blocks: [{ type: 'paragraph', text: truncated.text }],
@@ -710,7 +713,7 @@ const createServer = () => {
               } else {
                 // Mix native + OCR
                 const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
-                const truncated = truncate(combined, maxChars);
+                const truncated = truncate(combined, limit);
                 result = {
                   ...result,
                   blocks: [{ type: 'paragraph', text: truncated.text }],
@@ -805,7 +808,11 @@ const createServer = () => {
           } else {
             // Small file: check maxSize, then inline as base64
             if (size > maxSize) {
-              throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${(maxSize / 1024 / 1024).toFixed(1)} MB)`);
+              const maxMB = (maxSize / 1024 / 1024).toFixed(1);
+              const hint = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'].includes(content_type)
+                ? ' If this is a supported document (PDF, DOCX, PPTX), try the "extract_file" tool to pull text instead.'
+                : '';
+              throw new Error(`File ${id} is too large (${sizeMB} MB exceeds maxSize limit of ${maxMB} MB).${hint}`);
             }
             
             // Reuse fileMeta to avoid duplicate fetch

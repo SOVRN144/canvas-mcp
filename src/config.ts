@@ -40,6 +40,17 @@ export function redact(secret?: string | null): string {
   return `${s.slice(0,3)}…${s.slice(-3)}`;
 }
 
+/**
+ * Default character limits for text extraction and assignment retrieval.
+ * These are fallback values when maxChars is not explicitly provided.
+ */
+export const DEFAULTS = {
+  /** Default max characters for get_assignment tool */
+  assignmentMaxChars: 100_000,
+  /** Default max characters for extract_file tool */
+  extractMaxChars: 50_000,
+} as const;
+
 const ConfigSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
