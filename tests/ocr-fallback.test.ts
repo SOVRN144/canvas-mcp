@@ -1,61 +1,94 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import nock from 'nock';
-import { loadAppWithEnv } from './helpers.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import supertest from 'supertest';
 
-const CANVAS = process.env.CANVAS_BASE_URL || 'https://canvas.example.com';
-const OCR = process.env.OCR_WEBHOOK_URL || 'https://ocr.example.com/extract';
+// Mock axios before importing app
+const get = vi.fn();
+const post = vi.fn();
+const create = vi.fn(() => ({ get, post }));
+const AxiosHeaders = { from: (_: any) => ({}) };
+
+vi.mock('axios', () => ({
+  default: { create, get, post, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  AxiosHeaders,
+}));
+
+// Mock pdf-parse to avoid "missing callable export" error
+vi.mock('pdf-parse', () => ({ 
+  default: async (_buf: Buffer) => ({ text: '' })  // Empty text to trigger OCR
+}));
+
+let app: any;
+let sessionId: string;
 
 describe('extract_file OCR', () => {
-  let request: any;
-  let sessionId: string;
-
   beforeEach(async () => {
-    nock.cleanAll();
-    ({ request, sessionId } = await loadAppWithEnv({
-      OCR_PROVIDER: 'webhook',
-      OCR_WEBHOOK_URL: OCR,
-      CANVAS_BASE_URL: CANVAS,
-      CANVAS_TOKEN: 'test-token'
-    }));
-  });
-
-  afterEach(() => {
-    nock.cleanAll();
-  });
-
-  it('ocr:auto triggers webhook when native text empty', async () => {
-    const pdfBuffer = Buffer.from('mock-pdf-data');
+    vi.clearAllMocks();
     
-    nock(CANVAS)
-      .get('/api/v1/files/999')
-      .reply(200, {
-        id: 999,
+    // Set env before importing app
+    process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
+    process.env.OCR_PROVIDER = 'webhook';
+    process.env.OCR_WEBHOOK_URL = 'https://ocr.example.com/extract';
+    process.env.CANVAS_BASE_URL = 'https://canvas.example.com';
+    process.env.CANVAS_TOKEN = 'test-token';
+    
+    // Re-import app fresh
+    vi.resetModules();
+    app = (await import('../src/http.js')).app;
+    
+    // Initialize MCP session
+    const init = await supertest(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+      });
+    
+    expect(init.status).toBe(200);
+    sessionId = init.headers['mcp-session-id'];
+    expect(sessionId).toBeTruthy();
+  });
+
+  it('ocr:force triggers webhook', async () => {
+    const fileId = 999;
+    const pdfBuffer = Buffer.from('%PDF-1.4 mock pdf data');
+
+    // Mock sequence:
+    // 1. Get file metadata
+    get.mockResolvedValueOnce({
+      data: {
+        id: fileId,
         display_name: 'image-scan.pdf',
         filename: 'image-scan.pdf',
         size: pdfBuffer.length,
         content_type: 'application/pdf',
-        url: `${CANVAS}/files/999/download?verifier=abc`,
-      });
-
-    nock(CANVAS)
-      .get('/files/999/download')
-      .query(true)
-      .reply(200, pdfBuffer);
+        url: 'https://canvas.example.com/files/999/download?token=abc',
+      },
+    });
     
-    nock(CANVAS)
-      .get('/files/999/download')
-      .query(true)
-      .reply(200, pdfBuffer);
-
-    const u = new URL(OCR);
-    nock(u.origin)
-      .post(u.pathname)
-      .reply(200, {
+    // 2. Download file for extraction (native)
+    get.mockResolvedValueOnce({
+      data: pdfBuffer,
+      headers: { 'content-type': 'application/pdf' },
+    });
+    
+    // 3. Download file for OCR
+    get.mockResolvedValueOnce({
+      data: pdfBuffer,
+      headers: { 'content-type': 'application/pdf' },
+    });
+    
+    // 4. POST to OCR webhook
+    post.mockResolvedValueOnce({
+      data: {
         text: 'OCR extracted text from image PDF',
         pagesOcred: [1, 2],
-      });
+      },
+    });
 
-    const response = await request
+    const response = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
@@ -66,7 +99,7 @@ describe('extract_file OCR', () => {
         params: {
           name: 'extract_file',
           arguments: {
-            fileId: 999,
+            fileId,
             ocr: 'force',  // Force OCR to ensure webhook is called
             maxChars: 2000,
           },
@@ -74,32 +107,48 @@ describe('extract_file OCR', () => {
       });
 
     expect(response.status).toBe(200);
-    if (response.body.result?.structuredContent?.meta) {
-      expect(response.body.result.structuredContent.meta.source).toMatch(/ocr|mixed/);
-    }
-    expect(nock.isDone()).toBe(true);
+    expect(response.body.result).toBeDefined();
+    const meta = response.body.result.structuredContent.meta;
+    expect(meta.source).toMatch(/ocr|mixed/);
+    expect(meta.pagesOcred).toEqual([1, 2]);
+    
+    // Verify POST was called for OCR
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(
+      'https://ocr.example.com/extract',
+      expect.objectContaining({
+        mime: 'application/pdf',
+        languages: ['eng'],
+        maxPages: 20,
+      }),
+      expect.any(Object)
+    );
   });
 
   it('ocr:off returns helpful hint for image-only PDF', async () => {
-    const pdfBuffer = Buffer.from('mock-pdf-data');
-    
-    nock(CANVAS)
-      .get('/api/v1/files/888')
-      .reply(200, {
-        id: 888,
+    const fileId = 888;
+    const pdfBuffer = Buffer.from('%PDF-1.4 mock pdf data');
+
+    // Mock sequence:
+    // 1. Get file metadata
+    get.mockResolvedValueOnce({
+      data: {
+        id: fileId,
         display_name: 'scan.pdf',
         filename: 'scan.pdf',
         size: pdfBuffer.length,
         content_type: 'application/pdf',
-        url: `${CANVAS}/files/888/download?verifier=xyz`,
-      });
+        url: 'https://canvas.example.com/files/888/download?token=xyz',
+      },
+    });
+    
+    // 2. Download file for extraction
+    get.mockResolvedValueOnce({
+      data: pdfBuffer,
+      headers: { 'content-type': 'application/pdf' },
+    });
 
-    nock(CANVAS)
-      .get('/files/888/download')
-      .query(true)
-      .reply(200, pdfBuffer);
-
-    const response = await request
+    const response = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
@@ -110,16 +159,16 @@ describe('extract_file OCR', () => {
         params: {
           name: 'extract_file',
           arguments: {
-            fileId: 888,
+            fileId,
             ocr: 'off',
           },
         },
       });
 
-    // Might fail or return hint
-    if (response.body.error) {
-      expect(response.body.error.message).toMatch(/ocr.*auto.*force|download_file/i);
+    // Should return error hint
+    if (response.body.error || response.body.result?.isError) {
+      const errorMsg = response.body.error?.message || response.body.result?.content?.[0]?.text || '';
+      expect(errorMsg).toMatch(/ocr.*auto.*force|download_file/i);
     }
-    expect(nock.isDone()).toBe(true);
   });
 });

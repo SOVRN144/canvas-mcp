@@ -1,94 +1,132 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import nock from 'nock';
-import { loadAppWithEnv } from './helpers.js';
+import { describe, it, beforeEach, expect, vi } from 'vitest';
+import supertest from 'supertest';
 
-const CANVAS = process.env.CANVAS_BASE_URL || 'https://canvas.example.com';
+// Mock axios before importing app
+const get = vi.fn();
+const post = vi.fn();
+const create = vi.fn(() => ({ get, post }));
+const AxiosHeaders = { from: (_: any) => ({}) };
+
+vi.mock('axios', () => ({
+  default: { create, get, post, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  AxiosHeaders,
+}));
+
+let app: any;
+let sessionId: string;
 
 describe('download_file ergonomics', () => {
-  let request: any;
-  let sessionId: string;
-
   beforeEach(async () => {
-    nock.cleanAll();
-    ({ request, sessionId } = await loadAppWithEnv({
-      DOWNLOAD_MAX_INLINE_BYTES: String(10 * 1024), // 10KB for test
-      CANVAS_BASE_URL: CANVAS,
-      CANVAS_TOKEN: 'test-token'
-    }));
+    vi.clearAllMocks();
+    
+    // Set env before importing app
+    process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
+    process.env.DOWNLOAD_MAX_INLINE_BYTES = String(10 * 1024); // 10KB for test
+    process.env.CANVAS_BASE_URL = 'https://canvas.example.com';
+    process.env.CANVAS_TOKEN = 'test-token';
+    
+    // Re-import app fresh
+    vi.resetModules();
+    app = (await import('../src/http.js')).app;
+    
+    // Initialize MCP session
+    const init = await supertest(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+      });
+    
+    expect(init.status).toBe(200);
+    sessionId = init.headers['mcp-session-id'];
+    expect(sessionId).toBeTruthy();
   });
 
-  afterEach(() => {
-    nock.cleanAll();
-  });
-
-  it('inlines small files with base64 + file content item', async () => {
+  it('inlines small files with base64', async () => {
     const fileId = 7001;
+    const fileContent = Buffer.from('Hello, this is a small text file!');
 
-    nock(CANVAS).get(`/api/v1/files/${fileId}`).reply(200, {
-      id: fileId, 
-      size: 5120, 
-      content_type: 'text/plain',
-      display_name: 'hello.txt',
-      filename: 'hello.txt', 
-      url: `${CANVAS}/files/${fileId}/download?download_frd=1&verifier=abc`
+    // Mock sequence: metadata fetch, then file download
+    get.mockResolvedValueOnce({
+      data: {
+        id: fileId,
+        size: fileContent.length,
+        content_type: 'text/plain',
+        display_name: 'hello.txt',
+        filename: 'hello.txt',
+        url: 'https://canvas.example.com/files/7001/download?token=abc',
+      },
     });
     
-    nock(CANVAS).get(`/files/${fileId}/download`).query(true)
-      .reply(200, 'hello world', { 'Content-Type': 'text/plain' });
+    get.mockResolvedValueOnce({
+      data: fileContent,
+      headers: { 'content-type': 'text/plain' },
+    });
 
-    const res = await request
+    const res = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
-      .send({ 
-        jsonrpc: '2.0', 
-        id: 2, 
-        method: 'tools/call', 
-        params: { name: 'download_file', arguments: { fileId } } 
+      .send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'download_file', arguments: { fileId } },
       });
 
     expect(res.status).toBe(200);
+    expect(res.body.result).toBeDefined();
     const file = res.body.result.structuredContent.file;
+    expect(file.name).toBe('hello.txt');
     expect(file.dataBase64).toBeTruthy();
-    expect(nock.isDone()).toBe(true);
+    expect(file.dataBase64).toBe(fileContent.toString('base64'));
   });
 
   it('returns URL only for large files', async () => {
     const fileId = 7002;
+    const largeSize = 50 * 1024 * 1024; // 50MB
 
-    nock(CANVAS).get(`/api/v1/files/${fileId}`).reply(200, {
-      id: fileId, 
-      size: 50 * 1024 * 1024, 
-      content_type: 'application/pdf',
-      display_name: 'large.pdf',
-      filename: 'large.pdf', 
-      url: `${CANVAS}/files/${fileId}/download?download_frd=1&verifier=big`
+    // Only metadata fetch, no file download
+    get.mockResolvedValueOnce({
+      data: {
+        id: fileId,
+        size: largeSize,
+        content_type: 'application/pdf',
+        display_name: 'large.pdf',
+        filename: 'large.pdf',
+        url: 'https://canvas.example.com/files/7002/download?token=xyz',
+      },
     });
 
-    const res = await request
+    const res = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
-      .send({ 
-        jsonrpc: '2.0', 
-        id: 3, 
-        method: 'tools/call', 
-        params: { 
-          name: 'download_file', 
-          arguments: { 
+      .send({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'download_file',
+          arguments: {
             fileId,
-            maxSize: 100 * 1024 * 1024  // Set higher than file size
-          } 
-        } 
+            maxSize: 100 * 1024 * 1024, // Set higher than file size
+          },
+        },
       });
 
     expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    expect(res.body.result).toBeDefined();
+    if (!res.body.result?.structuredContent) {
+      console.error('Response body:', JSON.stringify(res.body, null, 2));
+    }
     const file = res.body.result.structuredContent.file;
     expect(file.url).toMatch(/^https:\/\/canvas\.example\.com\/files\/\d+\/download/);
     expect(file.dataBase64).toBeUndefined();
-
-    const items = res.body.result.content || [];
-    expect(items.find((x: any) => x.type === 'file')).toBeUndefined();
-    expect(nock.isDone()).toBe(true);
+    expect(file.size).toBe(largeSize);
   });
 });

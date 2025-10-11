@@ -61,6 +61,7 @@ type ExtractResult = {
     name: string;
     contentType: string;
     size: number;
+    url: string;  // Canvas signed download URL
   };
   mode: string;
   charCount: number;
@@ -397,6 +398,7 @@ export async function extractFileContent(
       name,
       contentType: finalContentType,
       size,
+      url: fileMeta.url,  // Add signed download URL
     },
     mode,
     charCount: limitedText.length,
@@ -410,28 +412,30 @@ export async function extractFileContent(
  * @param canvasClient The configured Canvas API client
  * @param fileId The Canvas file ID to download
  * @param maxSize Maximum file size in bytes (default 8MB)
+ * @param fileMeta Optional pre-fetched file metadata to avoid duplicate fetch
  * @returns File metadata with base64-encoded data
  * @throws If file exceeds size limit or download fails
  */
 export async function downloadFileAsBase64(
   canvasClient: AxiosInstance,
   fileId: number,
-  maxSize: number = 8_000_000
+  maxSize: number = 8_000_000,
+  fileMeta?: CanvasFile
 ): Promise<DownloadResult> {
-  // Get file metadata
-  const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+  // Get file metadata (or use provided)
+  const meta = fileMeta ?? await getCanvasFileMeta(canvasClient, fileId);
   
   // Check size limit
-  if (fileMeta.size > maxSize) {
-    fail(fileMeta.id, `too large for download (${fileMeta.size} bytes > ${maxSize} bytes limit).`);
+  if (meta.size > maxSize) {
+    fail(meta.id, `too large for download (${meta.size} bytes > ${maxSize} bytes limit).`);
   }
   
   // Download file content
-  const { buffer, contentType, name, size } = await downloadCanvasFile(fileMeta);
+  const { buffer, contentType, name, size } = await downloadCanvasFile(meta);
   
   return {
     file: {
-      id: fileMeta.id,
+      id: meta.id,
       name,
       contentType,
       size,

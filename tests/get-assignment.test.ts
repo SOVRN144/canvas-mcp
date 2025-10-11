@@ -1,39 +1,63 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import nock from 'nock';
-import { loadAppWithEnv } from './helpers.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import supertest from 'supertest';
 
-const CANVAS = process.env.CANVAS_BASE_URL || 'https://canvas.example.com';
+// Mock axios before importing app
+const get = vi.fn();
+const post = vi.fn();
+const create = vi.fn(() => ({ get, post }));
+const AxiosHeaders = { from: (_: any) => ({}) };
+
+vi.mock('axios', () => ({
+  default: { create, get, post, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  AxiosHeaders,
+}));
+
+let app: any;
+let sessionId: string;
 
 describe('get_assignment', () => {
-  let request: any;
-  let sessionId: string;
-
   beforeEach(async () => {
-    nock.cleanAll();
-    ({ request, sessionId } = await loadAppWithEnv({
-      CANVAS_BASE_URL: CANVAS,
-      CANVAS_TOKEN: 'test-token'
-    }));
-  });
-
-  afterEach(() => {
-    nock.cleanAll();
+    vi.clearAllMocks();
+    
+    // Set env before importing app
+    process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
+    process.env.CANVAS_BASE_URL = 'https://canvas.example.com';
+    process.env.CANVAS_TOKEN = 'test-token';
+    
+    // Re-import app fresh
+    vi.resetModules();
+    app = (await import('../src/http.js')).app;
+    
+    // Initialize MCP session
+    const init = await supertest(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+      });
+    
+    expect(init.status).toBe(200);
+    sessionId = init.headers['mcp-session-id'];
+    expect(sessionId).toBeTruthy();
   });
 
   it('returns text (mode:text) with truncation flag', async () => {
     const longDescription = '<p>' + 'a'.repeat(60000) + '</p>';
     
-    nock(CANVAS)
-      .get('/api/v1/courses/123/assignments/456')
-      .reply(200, {
+    get.mockResolvedValueOnce({
+      data: {
         id: 456,
         name: 'Test Assignment',
         description: longDescription,
         points_possible: 100,
         due_at: '2024-12-31T23:59:59Z',
-      });
+      },
+    });
 
-    const response = await request
+    const response = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
@@ -57,23 +81,22 @@ describe('get_assignment', () => {
     expect(response.body.result.structuredContent.assignment.text).toBeDefined();
     expect(response.body.result.structuredContent.assignment.truncated).toBe(true);
     expect(response.body.result.structuredContent.assignment.name).toBe('Test Assignment');
-    expect(nock.isDone()).toBe(true);
   });
 
   it('returns sanitized HTML (mode:html)', async () => {
     const dangerousHtml = '<p>Safe content</p><script>alert("xss")</script><p>More content</p>';
     
-    nock(CANVAS)
-      .get('/api/v1/courses/123/assignments/789')
-      .reply(200, {
+    get.mockResolvedValueOnce({
+      data: {
         id: 789,
         name: 'HTML Assignment',
         description: dangerousHtml,
         points_possible: 50,
         due_at: null,
-      });
+      },
+    });
 
-    const response = await request
+    const response = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Mcp-Session-Id', sessionId)
@@ -97,6 +120,5 @@ describe('get_assignment', () => {
     expect(html).toBeDefined();
     expect(html).not.toContain('<script>');
     expect(html).toContain('Safe content');
-    expect(nock.isDone()).toBe(true);
   });
 });

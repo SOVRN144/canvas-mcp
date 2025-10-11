@@ -678,13 +678,9 @@ const createServer = () => {
                 throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
               }
               
-              // Download file for OCR
-              const { getCanvasFileMeta } = await import('./files.js');
-              const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
-              
-              // Get file buffer
-              const axios = (await import('axios')).default;
-              const downloadResponse = await axios.get(fileMeta.url, {
+              // Download file for OCR using URL from extract result
+              const { default: axios } = await import('axios');
+              const downloadResponse = await axios.get(result.file.url!, {
                 responseType: 'arraybuffer',
                 headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
               });
@@ -775,7 +771,7 @@ const createServer = () => {
           const canvasClient = requireCanvasClient();
           const { getCanvasFileMeta } = await import('./files.js');
           
-          // Fetch file metadata first
+          // Fetch file metadata once
           const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
           const { id, display_name, filename, size, content_type, url } = fileMeta;
           const name = display_name || filename || `file-${id}`;
@@ -788,8 +784,8 @@ const createServer = () => {
           
           // Check if we should inline or return URL
           if (size <= config.downloadMaxInlineBytes) {
-            // Small file: inline as base64
-            const result = await downloadFileAsBase64(canvasClient, fileId, maxSize);
+            // Small file: inline as base64 - reuse fileMeta to avoid duplicate fetch
+            const result = await downloadFileAsBase64(canvasClient, fileId, maxSize, fileMeta);
             
             const attachmentText = `Attached file: ${name} (${sizeMB} MB, ${content_type})`;
             
