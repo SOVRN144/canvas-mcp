@@ -665,6 +665,9 @@ const createServer = () => {
           const fullText = result.blocks.map(b => b.text).join('\n\n');
           const isPdf = result.file.contentType === 'application/pdf';
           
+          // Lazy-load OCR helpers only when needed to satisfy noUnusedLocals and keep cold path light
+          const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
+          
           // Handle OCR logic
           if (isPdf && ocr !== 'off') {
             const needsOcr = ocr === 'force' || isImageOnly(fullText);
