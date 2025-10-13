@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import mammoth from 'mammoth';
 import { getSanitizedCanvasToken } from './config.js';
 import logger from './logger.js';
+import { redactUrl } from './utils/url.js';
 
 
 /**
@@ -140,18 +141,9 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       size: buffer.length,
     };
   } catch (error) {
-    const safeUrl = (() => {
-      try {
-        const parsed = new URL(fileMeta.url);
-        parsed.search = '';
-        return parsed.toString();
-      } catch {
-        return '(redacted)';
-      }
-    })();
     logger.error('Failed to download Canvas file', {
       fileId: fileMeta.id,
-      url: safeUrl,
+      url: redactUrl(fileMeta.url),
       error: String(error),
     });
     throw new Error(`File ${fileMeta.id}: failed to download file (${String(error)})`);
