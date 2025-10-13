@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-object-injection */
 import util from 'node:util';
 import { config } from './config.js';
 
@@ -28,6 +29,7 @@ const formatPayload = (level: LogLevel, message: string, data?: Record<string, u
 
   if (config.logFormat === 'pretty') {
     const { level: lvl, timestamp, message: msg, ...rest } = base;
+    // eslint-disable-next-line security/detect-object-injection
     const meta = Object.keys(rest).length ? ` ${util.inspect(rest, { depth: null, colors: true })}` : '';
     return `[${timestamp}] ${lvl.toUpperCase()} ${msg}${meta}`;
   }

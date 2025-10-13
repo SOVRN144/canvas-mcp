@@ -2,17 +2,15 @@ import 'dotenv/config';
 
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-
-import axios, { AxiosHeaders } from 'axios';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import axios, { AxiosHeaders, isAxiosError } from 'axios';
 import type { AxiosInstance } from 'axios';
 import cors from 'cors';
 import express from 'express';
 import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
-
 import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
@@ -125,12 +123,16 @@ const parseCanvasErrors = (data: unknown): string | null => {
     return null;
   }
   const anyData = data as Record<string, unknown>;
-  if (Array.isArray(anyData.errors)) {
-    return anyData.errors
-      .map((err) => {
+  const errors = anyData.errors;
+  if (Array.isArray(errors)) {
+    return errors
+      .map((err: unknown) => {
         if (typeof err === 'string') return err;
-        if (err && typeof err === 'object' && 'message' in err && typeof err.message === 'string') {
-          return err.message;
+        if (err && typeof err === 'object' && 'message' in err) {
+          const message = (err as { message?: unknown }).message;
+          if (typeof message === 'string') {
+            return message;
+          }
         }
         return JSON.stringify(err);
       })
@@ -146,7 +148,7 @@ const raiseCanvasError = (error: unknown): never => {
   const timestamp = new Date().toISOString();
   const safeMessage = 'Canvas request failed; check server logs for details';
 
-  if (axios.isAxiosError(error)) {
+  if (isAxiosError(error)) {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
     const details = parseCanvasErrors(error.response?.data);
@@ -238,9 +240,9 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
       seenPaths.add(normalizedPath);
 
       const response = query !== undefined
-        ? await canvasClient.get(currentUrl.toString(), { params: query })
-        : await canvasClient.get(currentUrl.toString());
-      const data = response.data as unknown;
+        ? await canvasClient.get<unknown>(currentUrl.toString(), { params: query })
+        : await canvasClient.get<unknown>(currentUrl.toString());
+      const data = response.data;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
         throw new Error(msg);
@@ -250,7 +252,9 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum result limit (${MAX_RESULTS}).`);
       }
       results.push(...pageData);
-      const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
+      const headers = response.headers as Record<string, unknown>;
+      const rawLinkHeader = headers['link'] ?? headers['Link'];
+      const next = typeof rawLinkHeader === 'string' ? parseNextLink(rawLinkHeader) : null;
       if (!next) {
         break;
       }
@@ -287,7 +291,7 @@ const jsonParseErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
         id = (req.body as Record<string, unknown>).id ?? null;
       } else if (typeof (err as { body?: unknown }).body === 'string') {
         try {
-          const parsed = JSON.parse((err as { body?: string }).body ?? '');
+          const parsed: unknown = JSON.parse((err as { body?: string }).body ?? '');
           if (parsed && typeof parsed === 'object') {
             id = (parsed as Record<string, unknown>).id ?? null;
           }
@@ -884,14 +888,14 @@ const toolsCallLimiter = rateLimit({
   identifier: 'tools-call',
   keyGenerator: (req) => {
     const rawSessionId = req.header(MCP_SESSION_HEADER);
-    const sessionId = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
-    if (sessionId && sessionId.trim().length > 0) {
+    const sessionId = typeof rawSessionId === 'string' ? rawSessionId : rawSessionId?.[0];
+    if (typeof sessionId === 'string' && sessionId.trim().length > 0) {
       return sessionId.trim();
     }
     return fallbackSessionKey(req);
   },
   skip: (req) => {
-    const body = req.body;
+    const body = req.body as unknown;
     if (typeof body !== 'object' || body === null) {
       return true;
     }
@@ -899,8 +903,11 @@ const toolsCallLimiter = rateLimit({
     return method !== 'tools/call';
   },
   handler: (req, res) => {
+    const requestBody = req.body as unknown;
     const id =
-      typeof req.body === 'object' && req.body !== null ? (req.body as Record<string, unknown>).id ?? null : null;
+      typeof requestBody === 'object' && requestBody !== null
+        ? (requestBody as Record<string, unknown>).id ?? null
+        : null;
     res.status(429).json(buildJsonRpcError('Session rate limit exceeded', id));
   },
 });
@@ -1064,7 +1071,7 @@ const closeSession = (
 
   if (!options.initiatedByTransport) {
     try {
-      target.transport.close();
+      void target.transport.close();
     } catch {
       // ignore shutdown errors
     }
@@ -1088,7 +1095,7 @@ const getActiveSession = (sessionId: string): SessionEntry | undefined => {
       closeSession(sessionId, entry);
     } else {
       try {
-        entry.transport.close();
+        void entry.transport.close();
       } catch {
         // ignore shutdown errors
       }
@@ -1115,9 +1122,10 @@ setInterval(() => {
 app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Response) => {
   try {
     const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
+    const requestBody = req.body as unknown;
     const requestId =
-      req.body && typeof req.body === 'object'
-        ? (req.body as Record<string, unknown>).id ?? null
+      typeof requestBody === 'object' && requestBody !== null
+        ? (requestBody as Record<string, unknown>).id ?? null
         : null;
     if (shuttingDown) {
       res.status(503).json({
@@ -1142,7 +1150,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
         });
         return;
       }
-      if (!isInitialize(req.body)) {
+      if (!isInitialize(requestBody)) {
         res.status(400).json({
           jsonrpc: '2.0',
           error: {
@@ -1195,7 +1203,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
 
       const run = async () => {
         await sessionServer.connect(transport);
-        const payload = normalizeInitializePayload(req.body);
+        const payload = normalizeInitializePayload(requestBody);
         try {
           await transport.handleRequest(asNode(req), asNodeRes(res), payload);
         } catch (error) {
@@ -1203,7 +1211,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
             closeSession(initializedSessionId);
           } else {
             try {
-              transport.close();
+              void transport.close();
             } catch {
               // ignore shutdown errors
             }
@@ -1236,12 +1244,12 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
     }
 
     existing.lastSeen = Date.now();
-    await existing.transport.handleRequest(asNode(req), asNodeRes(res), req.body);
+    await existing.transport.handleRequest(asNode(req), asNodeRes(res), requestBody);
   } catch (error) {
     if (!res.headersSent) {
       const message = error instanceof Error ? error.message : String(error);
       const requestId =
-        req.body && typeof req.body === 'object'
+        typeof req.body === 'object' && req.body !== null
           ? (req.body as Record<string, unknown>).id ?? null
           : null;
       res.status(500).json({

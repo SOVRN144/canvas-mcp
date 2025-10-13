@@ -1,6 +1,6 @@
 // src/sanitize.ts
-import sanitizeHtml from 'sanitize-html';
 import he from 'he';
+import sanitizeHtml from 'sanitize-html';
 
 /** Opinionated, safe default sanitizer for Canvas assignment descriptions. */
 export function sanitizeHtmlSafe(input: string, opts?: Partial<sanitizeHtml.IOptions>): string {
