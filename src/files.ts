@@ -1,10 +1,10 @@
 import axios from 'axios';
+import type { AxiosInstance } from 'axios';
 import JSZip from 'jszip';
 import mammoth from 'mammoth';
 import { getSanitizedCanvasToken } from './config.js';
 import logger from './logger.js';
 
-import type { AxiosInstance } from 'axios';
 
 /**
  * Throws a standardized error for file processing failures.
@@ -187,13 +187,13 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule = await import('pdf-parse');
-    const maybePdfParse =
-      typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule.default;
-    if (typeof maybePdfParse !== 'function') {
+    const mod: unknown = await import('pdf-parse');
+    const maybe =
+      typeof mod === 'function' ? mod : (mod as { default?: unknown }).default;
+    if (typeof maybe !== 'function') {
       throw new Error('pdf-parse: missing callable export');
     }
-    const pdfParse = maybePdfParse as (buf: Buffer) => Promise<{ text: string }>;
+    const pdfParse = maybe as (buf: Buffer) => Promise<{ text: string }>;
     const { text } = await pdfParse(buffer);
     return normalizeWhitespace(text);
   } catch (error) {
@@ -234,6 +234,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     }
     
     for (const slideFile of slideFiles) {
+      // eslint-disable-next-line security/detect-object-injection
       const file = zip.files[slideFile];
       if (!file) fail(fileId, `slide not found (${slideFile})`);
       const slideXml = await file.async('text');
