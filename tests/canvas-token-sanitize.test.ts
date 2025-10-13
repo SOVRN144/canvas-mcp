@@ -1,7 +1,8 @@
+/* eslint-disable security/detect-object-injection */
 import axios, { AxiosHeaders } from 'axios';
+import type { AxiosInstance, CreateAxiosDefaults } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AxiosInstance, CreateAxiosDefaults } from 'axios';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -13,15 +14,23 @@ const getAuthorizationHeader = (headers: unknown): string | undefined => {
   if (!headers) return undefined;
 
   const keys = ['Authorization', 'authorization', 'AUTHORIZATION'] as const;
+  const findString = (value: unknown): string | undefined => {
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      const firstString = value.find((entry: unknown): entry is string => typeof entry === 'string');
+      return firstString;
+    }
+    return undefined;
+  };
 
   if (headers instanceof AxiosHeaders) {
     for (const key of keys) {
       const value = headers.get?.(key);
-      if (typeof value === 'string') {
-        return value;
-      }
-      if (Array.isArray(value) && typeof value[0] === 'string') {
-        return value[0];
+      const resolved = findString(value);
+      if (resolved) {
+        return resolved;
       }
     }
     return undefined;
@@ -30,12 +39,9 @@ const getAuthorizationHeader = (headers: unknown): string | undefined => {
   if (typeof headers === 'object') {
     const dict = headers as Record<string, unknown>;
     for (const key of keys) {
-      const value = dict[key];
-      if (typeof value === 'string') {
-        return value;
-      }
-      if (Array.isArray(value) && typeof value[0] === 'string') {
-        return value[0];
+      const resolved = findString(dict[key]);
+      if (resolved) {
+        return resolved;
       }
     }
   }
