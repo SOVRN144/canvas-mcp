@@ -1,10 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios, { AxiosHeaders } from 'axios';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { AxiosInstance, AxiosRequestConfig } from 'axios';
 
 const ORIGINAL_ENV = { ...process.env };
 
 const loadServer = async () => {
-  await import('../src/http');
+  await import('../src/http.js');
+};
+
+const getAuthorizationHeader = (headers: unknown): string | undefined => {
+  if (!headers) {
+    return undefined;
+  }
+  if (headers instanceof AxiosHeaders) {
+    return (
+      headers.get?.('Authorization') ??
+      headers.get?.('authorization') ??
+      headers.get?.('AUTHORIZATION') ??
+      undefined
+    );
+  }
+  if (typeof headers === 'object') {
+    const dict = headers as Record<string, unknown>;
+    for (const key of ['Authorization', 'authorization', 'AUTHORIZATION'] as const) {
+      const value = dict[key];
+      if (typeof value === 'string') {
+        return value;
+      }
+    }
+  }
+  return undefined;
 };
 
 describe('Canvas token sanitization', () => {
@@ -29,25 +55,22 @@ describe('Canvas token sanitization', () => {
   });
 
   it('uses trimmed CANVAS_TOKEN when building Authorization headers', async () => {
-    let capturedConfig: any;
-    vi.spyOn(axios, 'create').mockImplementation((config?: any) => {
+    let capturedConfig: AxiosRequestConfig | undefined;
+    vi.spyOn(axios, 'create').mockImplementation((config?: AxiosRequestConfig) => {
       capturedConfig = config;
       return {
         defaults: { headers: config?.headers ?? undefined },
         get: vi.fn(),
-      } as any;
+      } as unknown as AxiosInstance;
     });
 
     await loadServer();
 
     expect(capturedConfig).toBeTruthy();
-    const headers = capturedConfig?.headers as AxiosHeaders | Record<string, any> | undefined;
-    const authHeader =
-      (headers as AxiosHeaders | undefined)?.get?.('Authorization') ??
-      (headers as AxiosHeaders | undefined)?.get?.('authorization') ??
-      (headers as AxiosHeaders | undefined)?.get?.('AUTHORIZATION') ??
-      (headers as Record<string, any> | undefined)?.Authorization ??
-      (headers as Record<string, any> | undefined)?.authorization;
+    if (!capturedConfig) {
+      throw new Error('axios.create was not invoked');
+    }
+    const authHeader = getAuthorizationHeader(capturedConfig.headers);
     expect(authHeader).toBe('Bearer abc123');
   });
 });

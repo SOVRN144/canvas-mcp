@@ -1,4 +1,4 @@
 declare module 'supertest' {
-  const request: any;
+  const request: unknown;
   export default request;
 }

@@ -1,5 +1,9 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { extractErrorMessage, requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // Set env before importing
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -8,11 +12,16 @@ process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
 // Mock axios
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
@@ -23,9 +32,13 @@ vi.mock('jszip', () => {
 
 const { default: JSZip } = await import('jszip');
 
-let app: any;
+type JsZipMockFile = { async: (type: string) => Promise<string> };
+type JsZipMock = { files: Record<string, JsZipMockFile> };
+type JsZipInstance = Awaited<ReturnType<typeof JSZip.loadAsync>>;
 
-async function initSession() {
+let app: Express;
+
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -36,10 +49,14 @@ async function initSession() {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     });
-  return res.headers['mcp-session-id'];
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sid: string, name: string, args: any) {
+async function callTool(
+  sid: string,
+  name: string,
+  args: Record<string, unknown> | undefined
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
@@ -55,38 +72,31 @@ async function callTool(sid: string, name: string, args: any) {
   return res.body;
 }
 
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
-}
-
 describe('files/extract PPTX', () => {
   beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('extracts slide text from PPTX and returns structured blocks', async () => {
     // Mock JSZip to return slides
-    const mockZip = {
+    const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Introduction Slide</a:t><a:t>Welcome to the course</a:t><a:t>Key concepts overview</a:t>')
+          async: async () =>
+            '<a:t>Introduction Slide</a:t><a:t>Welcome to the course</a:t><a:t>Key concepts overview</a:t>',
         },
         'ppt/slides/slide2.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Next Slide</a:t>')
+          async: async () => '<a:t>Next Slide</a:t>',
         },
-      }
+      },
     };
-    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(
+      mockZip as unknown as JsZipInstance
+    );
 
     get.mockReset();
     get.mockImplementation((url: string) => {
@@ -121,18 +131,29 @@ describe('files/extract PPTX', () => {
     expect(sc.blocks.length).toBeGreaterThan(0);
     
     // Should have slide structure
-    expect(sc.blocks.some((b: any) => b.type === 'heading' && b.text.includes('Slide'))).toBe(true);
+    const hasHeading = sc.blocks.some((block: unknown) => {
+      if (!block || typeof block !== 'object') return false;
+      const candidate = block as { type?: unknown; text?: unknown };
+      return (
+        candidate.type === 'heading' &&
+        typeof candidate.text === 'string' &&
+        candidate.text.includes('Slide')
+      );
+    });
+    expect(hasHeading).toBe(true);
   });
 
   it('handles PPTX with octet-stream content type via extension fallback', async () => {
-    const mockZip = {
+    const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Fallback Detection</a:t>')
-        }
-      }
+          async: async () => '<a:t>Fallback Detection</a:t>',
+        },
+      },
     };
-    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(
+      mockZip as unknown as JsZipInstance
+    );
 
     get.mockReset();
     get.mockImplementation((url: string) => {
@@ -163,17 +184,19 @@ describe('files/extract PPTX', () => {
 
   it('rejects PPTX with too many slides', async () => {
     // Create a mock with over 500 slides using shared mock for performance
-    const mockZipWithManySlides = {
-      files: {} as Record<string, any>
-    };
+    const mockZipWithManySlides: JsZipMock = { files: {} };
     
     // Generate 501 slide files with shared mock for speed
-    const sharedSlideMock = { async: vi.fn().mockResolvedValue('<a:t>Slide text</a:t>') };
+    const sharedSlideMock: JsZipMockFile = {
+      async: async () => '<a:t>Slide text</a:t>',
+    };
     for (let i = 1; i <= 501; i++) {
-      mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = sharedSlideMock as any;
+      mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = sharedSlideMock;
     }
     
-    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZipWithManySlides as any);
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(
+      mockZipWithManySlides as unknown as JsZipInstance
+    );
 
     get.mockReset();
     get.mockImplementation((url: string) => {
@@ -198,27 +221,29 @@ describe('files/extract PPTX', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 999 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 999: PPTX file has too many slides \(501 > 500\)/);
   });
 
   it('respects numeric slide ordering (slide2.xml < slide10.xml)', async () => {
     // Mock zip with slides in non-alphabetical order
-    const mockZip = {
+    const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide10.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Slide 10</a:t>')
+          async: async () => '<a:t>Slide 10</a:t>',
         },
         'ppt/slides/slide2.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Slide 2</a:t>')
+          async: async () => '<a:t>Slide 2</a:t>',
         },
         'ppt/slides/slide1.xml': {
-          async: vi.fn().mockResolvedValue('<a:t>Slide 1</a:t>')
-        }
-      }
+          async: async () => '<a:t>Slide 1</a:t>',
+        },
+      },
     };
-    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(
+      mockZip as unknown as JsZipInstance
+    );
 
     get.mockReset();
     get.mockImplementation((url: string) => {
@@ -259,17 +284,19 @@ describe('files/extract PPTX', () => {
     // Test slide with different title - should also skip first <a:t>
     const slideWithDifferentTitle = '<a:t>Different Title</a:t><a:t>Body Text 3</a:t><a:t>Body Text 4</a:t>';
     
-    const mockZip = {
+    const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: vi.fn().mockResolvedValue(slideWithTitle)
+          async: async () => slideWithTitle,
         },
         'ppt/slides/slide2.xml': {
-          async: vi.fn().mockResolvedValue(slideWithDifferentTitle)
-        }
-      }
+          async: async () => slideWithDifferentTitle,
+        },
+      },
     };
-    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(mockZip as any);
+    vi.mocked(JSZip.loadAsync).mockResolvedValueOnce(
+      mockZip as unknown as JsZipInstance
+    );
 
     get.mockReset();
     get.mockImplementation((url: string) => {

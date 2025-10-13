@@ -3,21 +3,30 @@ process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
 process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { extractErrorMessage, findTextContent, requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // Mock axios
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
-let app: any;
+let app: Express;
 
-async function initSession() {
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -28,10 +37,14 @@ async function initSession() {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     });
-  return res.headers['mcp-session-id'];
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sid: string, name: string, args: any) {
+async function callTool(
+  sid: string,
+  name: string,
+  args: Record<string, unknown> | undefined
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
@@ -47,23 +60,13 @@ async function callTool(sid: string, name: string, args: any) {
   return res.body;
 }
 
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
-}
-
 describe('files/download (download_file)', () => {
   beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('returns a base64 attachment when under limit', async () => {
@@ -101,7 +104,7 @@ describe('files/download (download_file)', () => {
     expect(file.dataBase64.length).toBeGreaterThan(0);
 
     // Also expect a human text line
-    const text = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const text = findTextContent(body.result.content);
     expect(text).toMatch(/Attached file/i);
   });
 
@@ -133,7 +136,7 @@ describe('files/download (download_file)', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'download_file', { fileId: 888, maxSize: 1024 }); // 1 KB
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/too large|maxSize|extract_file/i);
   });

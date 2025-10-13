@@ -1,5 +1,9 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import type { Express } from 'express';
+
+import { findTextContent, requireSessionId } from './helpers.js';
 
 // Set env before importing
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
@@ -7,26 +11,31 @@ process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
 // Mock axios
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
 // Mock mammoth for DOCX extraction
 vi.mock('mammoth', () => ({
   default: {
-    extractRawText: async (_: any) => ({
+    extractRawText: async (_: unknown) => ({
       value: 'Document title\n\nThis is extracted DOCX content with multiple paragraphs.\n\nSecond paragraph here.'
     })
   }
 }));
 
-let app: any;
+let app: Express;
 
-async function initSession() {
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -37,10 +46,14 @@ async function initSession() {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     });
-  return res.headers['mcp-session-id'];
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sid: string, name: string, args: any) {
+async function callTool(
+  sid: string,
+  name: string,
+  args: Record<string, unknown> | undefined
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
@@ -58,8 +71,11 @@ async function callTool(sid: string, name: string, args: any) {
 
 describe('files/extract DOCX', () => {
   beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('extracts text from DOCX and returns structured blocks', async () => {
@@ -97,7 +113,7 @@ describe('files/extract DOCX', () => {
     expect(sc.blocks.length).toBeGreaterThan(0);
     
     // Should contain text from mammoth mock
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('extracted DOCX content');
   });
 

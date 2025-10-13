@@ -1,5 +1,9 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { extractErrorMessage, requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // Set env before importing
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -8,17 +12,22 @@ process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
 // Mock axios
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
-let app: any;
+let app: Express;
 
-async function initSession() {
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -30,10 +39,14 @@ async function initSession() {
       params: { protocolVersion: '2024-11-05' },
     });
 
-  return res.headers['mcp-session-id'];
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sessionId: string, tool: string, args: any) {
+async function callTool(
+  sessionId: string,
+  tool: string,
+  args: Record<string, unknown>
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sessionId)
@@ -46,26 +59,17 @@ async function callTool(sessionId: string, tool: string, args: any) {
       params: { name: tool, arguments: args },
     });
 
-  return res.body;
-}
-
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
+  expect(res.status).toBe(200);
+  return res.body as unknown;
 }
 
 describe('files/extract edge cases', () => {
   beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('handles missing header + .TXT extension → resolves as text/plain', async () => {
@@ -149,7 +153,7 @@ describe('files/extract edge cases', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 103 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 103: content type not allowed/);
   });
@@ -179,7 +183,7 @@ describe('files/extract edge cases', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 104 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 104: too large for extraction.*Use download_file instead/);
   });

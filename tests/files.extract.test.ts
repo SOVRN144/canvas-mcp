@@ -1,5 +1,9 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { extractErrorMessage, findTextContent, requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // ---- Env must be set BEFORE importing the app ----
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -8,11 +12,16 @@ process.env.CANVAS_TOKEN = 'x';
 process.env.MAX_EXTRACT_MB = '15';
 
 // Mock axios (used by Canvas API + file download)
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
@@ -25,10 +34,10 @@ vi.mock('pdf-parse', () => ({
 
 // If your implementation uses mammoth/jszip for DOCX/PPTX, you can add mocks here as needed.
 
-let app: any;
+let app: Express;
 
 // Small helpers
-async function initSession() {
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -39,12 +48,14 @@ async function initSession() {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     });
-  const sid = res.headers['mcp-session-id'];
-  expect(sid).toBeTruthy();
-  return sid;
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sid: string, name: string, args: any) {
+async function callTool(
+  sid: string,
+  name: string,
+  args: Record<string, unknown> | undefined
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
@@ -60,24 +71,14 @@ async function callTool(sid: string, name: string, args: any) {
   return res.body;
 }
 
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
-}
-
 describe('files/extract (extract_file)', () => {
   beforeAll(async () => {
     // Import after env + mocks are ready
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('extracts text from a PDF (happy path)', async () => {
@@ -117,7 +118,7 @@ describe('files/extract (extract_file)', () => {
     expect(Array.isArray(sc.blocks)).toBe(true);
     expect(sc.blocks.length).toBeGreaterThan(0);
     // preview text should be present
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('Acoustics'); // from our pdf-parse mock
   });
 
@@ -145,7 +146,7 @@ describe('files/extract (extract_file)', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 999 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/too large|extract_file/i);
   });
@@ -174,7 +175,7 @@ describe('files/extract (extract_file)', () => {
     const sid = await initSession();
     const body = await callTool(sid, 'extract_file', { fileId: 55 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/unsupported|image|not allowed/i);
   });

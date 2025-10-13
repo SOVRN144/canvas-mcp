@@ -1,43 +1,78 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import axios from 'axios';
-import type { AxiosInstance } from 'axios';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Set required env vars before importing
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-process.env.DISABLE_HTTP_LISTEN = '1';
+import { requireSessionId } from './helpers.js';
+
+import type { AxiosError, AxiosInstance } from 'axios';
+import type { Express } from 'express';
+type MockedFn<T extends (...args: unknown[]) => unknown> = ReturnType<typeof vi.fn<T>>;
+
+type AxiosInstanceMock = {
+  get: MockedFn<(url: string, config?: unknown) => Promise<unknown>>;
+  post: MockedFn<(...args: unknown[]) => Promise<unknown>>;
+  put: MockedFn<(...args: unknown[]) => Promise<unknown>>;
+  delete: MockedFn<(...args: unknown[]) => Promise<unknown>>;
+  interceptors: {
+    request: { use: MockedFn<(onFulfilled: unknown, onRejected?: unknown) => void> };
+    response: { use: MockedFn<(onFulfilled: unknown, onRejected?: unknown) => void> };
+  };
+  defaults: {
+    baseURL: string;
+    headers: { common: Record<string, unknown> };
+  };
+};
+
+const createAxiosMock = (): AxiosInstanceMock => {
+  const get = vi.fn<(url: string, config?: unknown) => Promise<unknown>>();
+  const post = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  const put = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  const remove = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  const useRequest = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
+  const useResponse = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
+
+  return {
+    get,
+    post,
+    put,
+    delete: remove,
+    interceptors: {
+      request: { use: useRequest },
+      response: { use: useResponse },
+    },
+    defaults: {
+      baseURL: 'https://example.canvas.test',
+      headers: { common: {} },
+    },
+  };
+};
 
 describe('list_courses', () => {
-  let app: any;
-  let mockAxiosInstance: any;
+  let app: Express;
+  let mockAxiosInstance: AxiosInstanceMock;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
+    process.env.CANVAS_TOKEN = 'x';
+    process.env.DISABLE_HTTP_LISTEN = '1';
     
     // Mock axios instance methods
-    mockAxiosInstance = {
-      get: vi.fn(),
-      post: vi.fn(),
-      put: vi.fn(),
-      delete: vi.fn(),
-      interceptors: {
-        request: { use: vi.fn() },
-        response: { use: vi.fn() }
-      },
-      defaults: {
-        baseURL: 'https://example.canvas.test',
-        headers: { common: {} }
-      }
-    } as unknown as AxiosInstance;
+    mockAxiosInstance = createAxiosMock();
 
     // Mock axios.create to return our mock instance
-    vi.spyOn(axios, 'create').mockReturnValue(mockAxiosInstance);
-    vi.spyOn(axios, 'isAxiosError').mockImplementation((error: any) => !!error?.isAxiosError);
+    vi.spyOn(axios, 'create').mockReturnValue(mockAxiosInstance as unknown as AxiosInstance);
+    vi.spyOn(axios, 'isAxiosError').mockImplementation(
+      (error: unknown): error is AxiosError =>
+        typeof error === 'object' && error !== null && 'isAxiosError' in error
+    );
 
     // Dynamically import after mocking
     const httpModule = await import('../src/http.js');
+    if (!httpModule.app) {
+      throw new Error('HTTP module did not export app');
+    }
     app = httpModule.app;
   });
 
@@ -59,8 +94,7 @@ describe('list_courses', () => {
       .set('Content-Type', 'application/json')
       .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
     
-    const sessionId = init.headers['mcp-session-id'];
-    expect(sessionId).toBeDefined();
+    const sessionId = requireSessionId(init.headers['mcp-session-id']);
     expect(init.status).toBe(200);
 
     // Call list_courses tool
@@ -71,9 +105,14 @@ describe('list_courses', () => {
       .set('Mcp-Session-Id', sessionId)
       .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
 
-    // Verify success response
+    const body = result.body as {
+      result?: {
+        structuredContent?: { courses?: Array<{ id: number; name: string }> };
+      };
+    };
+
     expect(result.status).toBe(200);
-    expect(result.body.result?.structuredContent?.courses).toEqual([{ id: 1, name: 'C101' }]);
+    expect(body.result?.structuredContent?.courses).toEqual([{ id: 1, name: 'C101' }]);
 
     // Verify correct API call
     expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
@@ -102,8 +141,7 @@ describe('list_courses', () => {
       .set('Content-Type', 'application/json')
       .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
     
-    const sessionId = init.headers['mcp-session-id'];
-    expect(sessionId).toBeDefined();
+    const sessionId = requireSessionId(init.headers['mcp-session-id']);
     expect(init.status).toBe(200);
 
     // Call list_courses tool and expect error
@@ -115,9 +153,12 @@ describe('list_courses', () => {
       .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
 
     // Verify error response (JSON-RPC error in 200 envelope)
+    const body = result.body as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
     expect(result.status).toBe(200);
-    expect(result.body.result.isError).toBe(true);
-    expect(result.body.result.content[0].text).toMatch(/Canvas/);
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toMatch(/Canvas/);
   });
 
   it('should handle non-array response body', async () => {
@@ -134,8 +175,7 @@ describe('list_courses', () => {
       .set('Content-Type', 'application/json')
       .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
     
-    const sessionId = init.headers['mcp-session-id'];
-    expect(sessionId).toBeDefined();
+    const sessionId = requireSessionId(init.headers['mcp-session-id']);
     expect(init.status).toBe(200);
 
     // Call list_courses tool and expect error
@@ -147,8 +187,11 @@ describe('list_courses', () => {
       .send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_courses', arguments: {} } });
 
     // Verify error response
+    const body = result.body as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
     expect(result.status).toBe(200);
-    expect(result.body.result.isError).toBe(true);
-    expect(result.body.result.content[0].text).toMatch(/Canvas/);
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toMatch(/Canvas/);
   });
 });

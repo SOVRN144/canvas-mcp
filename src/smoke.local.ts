@@ -58,11 +58,20 @@ const ci = (msg: string) => console.log(msg);
     .set('Mcp-Session-Id', sessionId)
     .send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const tools = Array.isArray(list.body?.result?.tools) ? list.body.result.tools : [];
-  listOk = list.status === 200 && tools.some((tool: any) => tool?.name === 'echo');
+  const toolNames = tools
+    .map((tool) => {
+      if (tool && typeof tool === 'object' && 'name' in tool) {
+        const name = (tool as { name?: unknown }).name;
+        return typeof name === 'string' ? name : undefined;
+      }
+      return undefined;
+    })
+    .filter((name): name is string => typeof name === 'string');
+  listOk = list.status === 200 && toolNames.includes('echo');
   if (!listOk) pass = false;
-  console.log({ status: list.status, tools: tools.map((t: any) => t?.name) });
+  console.log({ status: list.status, tools: toolNames });
 
-  if (tools.some((tool: any) => tool?.name === 'list_courses')) {
+  if (toolNames.includes('list_courses')) {
     ci('### tools/call list_courses');
     const listCourses = await request(app)
       .post('/mcp')

@@ -1,8 +1,10 @@
-import axios, { type AxiosInstance } from 'axios';
+import axios from 'axios';
 import JSZip from 'jszip';
 import mammoth from 'mammoth';
 import { getSanitizedCanvasToken } from './config.js';
 import logger from './logger.js';
+
+import type { AxiosInstance } from 'axios';
 
 /**
  * Throws a standardized error for file processing failures.
@@ -173,16 +175,21 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
   return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
 
+const isPdfParseFn = (
+  value: unknown
+): value is (buf: Buffer) => Promise<{ text: string }> => typeof value === 'function';
+
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule = await import('pdf-parse') as any;
-    const pdfParseFn = (pdfParseModule?.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
-    if (typeof pdfParseFn !== 'function') {
+    const pdfParseModule: unknown = await import('pdf-parse');
+    const candidate =
+      (pdfParseModule as { default?: unknown }).default ?? pdfParseModule;
+    if (!isPdfParseFn(candidate)) {
       throw new Error('pdf-parse: missing callable export');
     }
 
-    const data = await pdfParseFn(buffer);
+    const data = await candidate(buffer);
     return normalizeWhitespace(data.text);
   } catch (error) {
     logger.error('Failed to extract PDF text', { fileId, error: String(error) });

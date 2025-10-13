@@ -1,18 +1,28 @@
-import { describe, it, beforeEach, expect, vi } from 'vitest';
 import supertest from 'supertest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // Mock axios before importing app
-const get = vi.fn();
-const post = vi.fn();
+const get = vi.fn<(url: string, config?: unknown) => Promise<unknown>>();
+const post = vi.fn<(url: string, data?: unknown) => Promise<unknown>>();
 const create = vi.fn(() => ({ get, post }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 
 vi.mock('axios', () => ({
-  default: { create, get, post, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    post,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
-let app: any;
+let app: Express;
 let sessionId: string;
 
 describe('download_file ergonomics', () => {
@@ -27,7 +37,11 @@ describe('download_file ergonomics', () => {
     
     // Re-import app fresh
     vi.resetModules();
-    app = (await import('../src/http.js')).app;
+    const httpModule = await import('../src/http.js');
+    if (!httpModule.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = httpModule.app;
     
     // Initialize MCP session
     const init = await supertest(app)
@@ -41,8 +55,7 @@ describe('download_file ergonomics', () => {
       });
     
     expect(init.status).toBe(200);
-    sessionId = init.headers['mcp-session-id'];
-    expect(sessionId).toBeTruthy();
+    sessionId = requireSessionId(init.headers['mcp-session-id']);
   });
 
   it('inlines small files with base64', async () => {

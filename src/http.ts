@@ -1,19 +1,25 @@
 import 'dotenv/config';
-import cors from 'cors';
-import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
-import { isMain } from './util/isMain.js';
-import axios, { AxiosInstance, AxiosHeaders } from 'axios';
+
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+
+import axios, { AxiosHeaders } from 'axios';
+import cors from 'cors';
+import express from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { z } from 'zod';
+
 import logger from './logger.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
-import { extractFileContent, downloadFileAsBase64 } from './files.js';
 import { getAssignment } from './canvas.js';
+import { extractFileContent, downloadFileAsBase64 } from './files.js';
+import { isMain } from './util/isMain.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
+
+import type { AxiosInstance } from 'axios';
+import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
@@ -25,7 +31,7 @@ if (IS_MAIN) {
   process.on('uncaughtException', (err) => {
     logger.error('uncaughtException during server startup', {
       error: String(err),
-      stack: (err as any)?.stack ?? null,
+      stack: err instanceof Error ? err.stack : null,
     });
     process.exit(1);
   });

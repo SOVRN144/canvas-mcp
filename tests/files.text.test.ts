@@ -1,5 +1,9 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
 import request from 'supertest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { findTextContent, requireSessionId } from './helpers.js';
+
+import type { Express } from 'express';
 
 // Set env before importing
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
@@ -7,17 +11,22 @@ process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
 // Mock axios
-const get = vi.fn();
+const get = vi.fn<(url: string) => Promise<unknown>>();
 const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
+const AxiosHeaders = { from: (_: unknown) => ({}) };
 vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
+  default: {
+    create,
+    get,
+    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
+    AxiosHeaders,
+  },
   AxiosHeaders,
 }));
 
-let app: any;
+let app: Express;
 
-async function initSession() {
+async function initSession(): Promise<string> {
   const res = await request(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
@@ -28,10 +37,14 @@ async function initSession() {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     });
-  return res.headers['mcp-session-id'];
+  return requireSessionId(res.headers['mcp-session-id']);
 }
 
-async function callTool(sid: string, name: string, args: any) {
+async function callTool(
+  sid: string,
+  name: string,
+  args: Record<string, unknown> | undefined
+) {
   const res = await request(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
@@ -49,8 +62,11 @@ async function callTool(sid: string, name: string, args: any) {
 
 describe('files/extract plain text', () => {
   beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+    const mod = await import('../src/http.js');
+    if (!mod.app) {
+      throw new Error('HTTP module did not export app');
+    }
+    app = mod.app;
   });
 
   it('extracts plain text and handles truncation', async () => {
@@ -88,7 +104,7 @@ describe('files/extract plain text', () => {
     expect(sc.charCount).toBeLessThanOrEqual(200);
     
     // Should show truncation in content
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toMatch(/[\u2026]/); // Match single ellipsis character
   });
 
@@ -121,7 +137,7 @@ describe('files/extract plain text', () => {
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/csv');
     expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
     
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('Name,Age,City');
   });
 
@@ -154,7 +170,7 @@ describe('files/extract plain text', () => {
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain'); // Normalized (no charset)
     expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
     
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('UTF-8 encoding');
   });
 
@@ -187,7 +203,7 @@ describe('files/extract plain text', () => {
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain'); // From extension
     expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
     
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('detected by .txt extension');
   });
 
@@ -221,7 +237,7 @@ describe('files/extract plain text', () => {
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain');
     expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
     
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const preview = findTextContent(body.result.content);
     expect(preview).toContain('uppercase extension');
   });
 });
