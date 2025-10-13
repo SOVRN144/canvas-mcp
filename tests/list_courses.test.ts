@@ -6,44 +6,24 @@ import { requireSessionId } from './helpers.js';
 
 import type { AxiosError, AxiosInstance } from 'axios';
 import type { Express } from 'express';
-type MockedFn<T extends (...args: unknown[]) => unknown> = ReturnType<typeof vi.fn<T>>;
 
+type AxiosResponseStub = { data: unknown; headers: Record<string, unknown> };
+type AxiosFnMock = ReturnType<typeof vi.fn<[string, unknown?], Promise<AxiosResponseStub>>>;
+type InterceptorUseMock = ReturnType<
+  typeof vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>
+>;
 type AxiosInstanceMock = {
-  get: MockedFn<(url: string, config?: unknown) => Promise<unknown>>;
-  post: MockedFn<(...args: unknown[]) => Promise<unknown>>;
-  put: MockedFn<(...args: unknown[]) => Promise<unknown>>;
-  delete: MockedFn<(...args: unknown[]) => Promise<unknown>>;
+  get: AxiosFnMock;
+  post: AxiosFnMock;
+  put: AxiosFnMock;
+  delete: AxiosFnMock;
   interceptors: {
-    request: { use: MockedFn<(onFulfilled: unknown, onRejected?: unknown) => void> };
-    response: { use: MockedFn<(onFulfilled: unknown, onRejected?: unknown) => void> };
+    request: { use: InterceptorUseMock };
+    response: { use: InterceptorUseMock };
   };
   defaults: {
     baseURL: string;
     headers: { common: Record<string, unknown> };
-  };
-};
-
-const createAxiosMock = (): AxiosInstanceMock => {
-  const get = vi.fn<(url: string, config?: unknown) => Promise<unknown>>();
-  const post = vi.fn<(...args: unknown[]) => Promise<unknown>>();
-  const put = vi.fn<(...args: unknown[]) => Promise<unknown>>();
-  const remove = vi.fn<(...args: unknown[]) => Promise<unknown>>();
-  const useRequest = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
-  const useResponse = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
-
-  return {
-    get,
-    post,
-    put,
-    delete: remove,
-    interceptors: {
-      request: { use: useRequest },
-      response: { use: useResponse },
-    },
-    defaults: {
-      baseURL: 'https://example.canvas.test',
-      headers: { common: {} },
-    },
   };
 };
 
@@ -59,10 +39,32 @@ describe('list_courses', () => {
     process.env.DISABLE_HTTP_LISTEN = '1';
     
     // Mock axios instance methods
-    mockAxiosInstance = createAxiosMock();
+    const get = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
+    const post = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
+    const put = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
+    const del = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
+    const useRequest = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
+    const useResponse = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
+
+    mockAxiosInstance = {
+      get,
+      post,
+      put,
+      delete: del,
+      interceptors: {
+        request: { use: useRequest },
+        response: { use: useResponse },
+      },
+      defaults: {
+        baseURL: 'https://example.canvas.test',
+        headers: { common: {} },
+      },
+    };
 
     // Mock axios.create to return our mock instance
-    vi.spyOn(axios, 'create').mockReturnValue(mockAxiosInstance as unknown as AxiosInstance);
+    vi.spyOn(axios, 'create').mockImplementation(
+      () => mockAxiosInstance as unknown as AxiosInstance
+    );
     vi.spyOn(axios, 'isAxiosError').mockImplementation(
       (error: unknown): error is AxiosError =>
         typeof error === 'object' && error !== null && 'isAxiosError' in error

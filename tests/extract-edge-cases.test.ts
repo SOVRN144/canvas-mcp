@@ -27,6 +27,15 @@ vi.mock('axios', () => ({
 
 let app: Express;
 
+type ToolCallResult = {
+  result?: {
+    structuredContent?: {
+      file?: { contentType?: string };
+      blocks?: Array<unknown>;
+    };
+  };
+};
+
 async function initSession(): Promise<string> {
   const res = await supertest(app)
     .post('/mcp')
@@ -46,7 +55,7 @@ async function callTool(
   sessionId: string,
   tool: string,
   args: Record<string, unknown>
-) {
+): Promise<unknown> {
   const res = await supertest(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sessionId)
@@ -100,10 +109,10 @@ describe('files/extract edge cases', () => {
     });
 
     const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 101 });
+    const body = (await callTool(sid, 'extract_file', { fileId: 101 })) as ToolCallResult;
 
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain');
-    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+    expect((body?.result?.structuredContent?.blocks?.length ?? 0)).toBeGreaterThan(0);
   });
 
   it('handles header with charset → accepted after normalization', async () => {
@@ -128,10 +137,10 @@ describe('files/extract edge cases', () => {
     });
 
     const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 102 });
+    const body = (await callTool(sid, 'extract_file', { fileId: 102 })) as ToolCallResult;
 
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/csv');
-    expect(body.result.structuredContent.blocks.length).toBeGreaterThan(0);
+    expect((body?.result?.structuredContent?.blocks?.length ?? 0)).toBeGreaterThan(0);
   });
 
   it('throws for unknown header + no extension', async () => {
