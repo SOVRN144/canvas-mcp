@@ -16,7 +16,8 @@
     "audit:ci": "npm audit --audit-level=high",
     "audit:ci:prod": "npm audit --omit=dev --audit-level=high",
     "smoke:local": "DISABLE_HTTP_LISTEN=1 node --import tsx/esm src/smoke.local.ts",
-    "smoke:public": "bash scripts/smoke-public.sh"
+    "smoke:public": "bash scripts/smoke-public.sh",
+    "pretest:smoke": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.19.1",
@@ -46,6 +47,7 @@
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-security": "1.7.1",
     "eslint-plugin-vitest": "^0.5.4",
+    "@vitest/coverage-v8": "^2.1.8",
     "nock": "^14.0.10",
     "prettier": "^3.6.2",
     "supertest": "^7.1.3",

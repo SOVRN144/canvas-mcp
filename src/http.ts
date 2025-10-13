@@ -17,6 +17,7 @@ import { extractFileContent, downloadFileAsBase64 } from './files.js';
 import logger from './logger.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
 import { isMain } from './util/isMain.js';
+import { redactUrl } from './utils/url.js';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
@@ -114,7 +115,7 @@ const logCanvasErrorEvent = (details: {
     status: details.status ?? null,
     statusText: details.statusText ?? null,
     details: details.details,
-    url: details.url ?? null,
+    url: details.url ? redactUrl(details.url) : null,
   });
 };
 
@@ -161,7 +162,7 @@ const raiseCanvasError = (error: unknown): never => {
       status: status ?? null,
       statusText: statusText ?? null,
       details: details || fallback,
-      ...(error.config?.url ? { url: error.config.url } : {}),
+      ...(error.config?.url ? { url: redactUrl(error.config.url) } : {}),
       timestamp,
     });
 
@@ -280,7 +281,8 @@ const redactSessionId = (value: string): string => {
   return value.length <= 8 ? value : `${value.slice(0, 8)}…`;
 };
 
-const fallbackSessionKey = (req: Request) => ipKeyGenerator(req.ip ?? '');
+const fallbackSessionKey = (req: Request) =>
+  ipKeyGenerator(req as unknown as Parameters<typeof ipKeyGenerator>[0]);
 
 const jsonParseErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
   if (err instanceof SyntaxError && typeof (err as { type?: unknown }).type === 'string') {
@@ -806,8 +808,7 @@ const createServer = () => {
             const attachmentText = `Attached file (via URL): ${name} (${sizeMB} MB, ${content_type})`;
             
             // Redact query params from URL for logging
-            const urlForLog = url.split('?')[0];
-            logger.info('Returning large file URL', { fileId: id, size, urlPreview: urlForLog });
+            logger.info('Returning large file URL', { fileId: id, size, urlPreview: redactUrl(url) });
             
             return {
               content: [{ type: 'text', text: attachmentText }],

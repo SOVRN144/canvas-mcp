@@ -38,11 +38,14 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - name: Build
-        run: |
-          npm ci || npm install
-          npm run typecheck
-          npm run build
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build TS -> dist
+        run: npm run build
 
       - name: Start MCP server
         run: |
@@ -173,12 +176,17 @@ jobs:
             echo "has_canvas=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build
+      - name: Install dependencies
         if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
-        run: |
-          npm ci || npm install
-          npm run typecheck
-          npm run build
+        run: npm ci || npm install
+
+      - name: Typecheck
+        if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
+        run: npm run typecheck
+
+      - name: Build TS -> dist
+        if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
+        run: npm run build
 
       - name: Install CLI deps
         if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
