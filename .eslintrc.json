@@ -27,6 +27,12 @@
         "varsIgnorePattern": "^_"
       }
     ],
+    "@typescript-eslint/no-misused-promises": [
+      "error",
+      {
+        "checksVoidReturn": false
+      }
+    ],
     "import/order": [
       "error",
       {
@@ -56,17 +62,18 @@
     {
       "files": ["tests/**/*.ts"],
       "env": {
-        "vitest/globals": true,
+        "vitest/env": true,
         "node": true
       },
-      "extends": ["plugin:vitest/recommended"],
+      "extends": ["plugin:vitest/legacy-recommended"],
       "rules": {
         "@typescript-eslint/no-unsafe-argument": "off",
         "@typescript-eslint/no-unsafe-assignment": "off",
         "@typescript-eslint/no-unsafe-member-access": "off",
         "@typescript-eslint/no-unsafe-call": "off",
         "@typescript-eslint/no-unsafe-return": "off",
-        "@typescript-eslint/no-misused-promises": "off"
+        "@typescript-eslint/no-misused-promises": "off",
+        "@typescript-eslint/require-await": "off"
       }
     }
   ]
