@@ -1,24 +1,65 @@
+import axios, { AxiosHeaders } from 'axios';
+import type { AxiosInstance, CreateAxiosDefaults } from 'axios';
 import type { Express } from 'express';
-/* eslint-disable security/detect-object-injection */
 import supertest from 'supertest';
 import type { SuperTest, Test } from 'supertest';
-import { vi } from 'vitest';
+import { expect, vi } from 'vitest';
+import { config } from '../src/config.js';
 
+export type ToolCallResult = {
+  content?: Array<{ type?: string; text?: string }>;
+  result?: {
+    isError?: boolean;
+    content?: Array<{ type?: string; text?: string }>;
+    structuredContent?: {
+      file?: {
+        id?: number;
+        name?: string;
+        contentType?: string;
+      };
+      blocks?: Array<{ type?: string; text?: string }>;
+      charCount?: number;
+      truncated?: boolean;
+      meta?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+  };
+  error?: { message?: string };
+};
 
-type LoadedApp = {
+export type LoadedAppContext = {
   app: Express;
   request: SuperTest<Test>;
   sessionId: string;
+  restoreEnv: () => void;
 };
+
+const snapshotEnv = (): NodeJS.ProcessEnv => ({ ...process.env });
 
 export async function loadAppWithEnv(
   overrides: Record<string, string> = {}
-): Promise<LoadedApp> {
-  for (const [key, value] of Object.entries(overrides)) {
-    process.env[key] = value;
+): Promise<LoadedAppContext> {
+  const previousEnv = snapshotEnv();
+  const previousDisable = config.disableHttpListen;
+  const previousCanvasBaseUrl = config.canvasBaseUrl;
+  const previousCanvasToken = config.canvasToken;
+  const previousOcrProvider = config.ocrProvider;
+  const previousOcrWebhook = config.ocrWebhookUrl;
+  const nextEnv = { ...previousEnv, DISABLE_HTTP_LISTEN: '1', ...overrides };
+  Object.assign(process.env, nextEnv);
+  config.disableHttpListen = true;
+  if (overrides.CANVAS_BASE_URL) {
+    config.canvasBaseUrl = overrides.CANVAS_BASE_URL;
   }
-
-  vi.resetModules();
+  if (overrides.CANVAS_TOKEN) {
+    config.canvasToken = overrides.CANVAS_TOKEN;
+  }
+  if (overrides.OCR_PROVIDER) {
+    config.ocrProvider = overrides.OCR_PROVIDER as typeof config.ocrProvider;
+  }
+  if (overrides.OCR_WEBHOOK_URL) {
+    config.ocrWebhookUrl = overrides.OCR_WEBHOOK_URL;
+  }
 
   const httpModule = await import('../src/http.js');
   const { app } = httpModule;
@@ -41,16 +82,120 @@ export async function loadAppWithEnv(
       },
     });
 
-  if (init.status !== 200) {
-    throw new Error(`initialize failed: ${init.status} ${JSON.stringify(init.body)}`);
-  }
+  expect(init.status).toBe(200);
+  const sessionId = requireSessionId(init.headers['mcp-session-id']);
 
-  const sessionHeader = init.headers['mcp-session-id'];
-  if (typeof sessionHeader !== 'string') {
-    throw new Error('initialize did not return a single Mcp-Session-Id header');
-  }
+  const restoreEnv = () => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in previousEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, previousEnv);
+    config.disableHttpListen = previousDisable;
+    config.canvasBaseUrl = previousCanvasBaseUrl;
+    config.canvasToken = previousCanvasToken;
+    config.ocrProvider = previousOcrProvider;
+    config.ocrWebhookUrl = previousOcrWebhook;
+  };
 
-  return { app, request, sessionId: sessionHeader };
+  return { app, request, sessionId, restoreEnv };
+}
+
+type AxiosGetFn = (url: string, config?: unknown) => Promise<unknown>;
+type AxiosDataFn = (url: string, data?: unknown, config?: unknown) => Promise<unknown>;
+
+export const createAxiosMockSuite = () => {
+  const get = vi.fn<AxiosGetFn>();
+  const post = vi.fn<AxiosDataFn>();
+  const put = vi.fn<AxiosDataFn>();
+  const del = vi.fn<AxiosGetFn>();
+  const cloneHeaders = (headers?: Record<string, unknown>) => {
+    if (!headers) {
+      return Object.create(null) as Record<string, unknown>;
+    }
+    const clone = Object.create(null) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(headers)) {
+      Reflect.defineProperty(clone, key, {
+        value,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+    }
+    return clone;
+  };
+  const createHeaders = vi.fn((headers?: Record<string, unknown>) => {
+    const instance = new AxiosHeaders();
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            if (typeof entry === 'string') {
+              instance.set(key, entry);
+            }
+          }
+        } else if (typeof value === 'string') {
+          instance.set(key, value);
+        } else if (value != null) {
+          instance.set(key, String(value));
+        }
+      }
+    }
+    return instance;
+  });
+
+  const install = () => {
+    vi.spyOn(axios, 'get').mockImplementation((url: string, config?: unknown) => get(url, config));
+    vi.spyOn(axios, 'post').mockImplementation((url: string, data?: unknown, config?: unknown) => post(url, data, config));
+    vi.spyOn(axios, 'put').mockImplementation((url: string, data?: unknown, config?: unknown) => put(url, data, config));
+    vi.spyOn(axios, 'delete').mockImplementation((url: string, config?: unknown) => del(url, config));
+    vi.spyOn(axios, 'create').mockImplementation((config?: CreateAxiosDefaults) => {
+      const headersCopy = cloneHeaders(config?.headers as Record<string, unknown> | undefined);
+      return {
+        defaults: {
+          headers: headersCopy,
+          baseURL: config?.baseURL ?? '',
+        },
+        get,
+        post,
+        put,
+        delete: del,
+      } as unknown as AxiosInstance;
+    });
+    vi.spyOn(AxiosHeaders, 'from').mockImplementation((init?: unknown) => createHeaders(init as Record<string, unknown>));
+  };
+
+  const reset = () => {
+    get.mockReset();
+    post.mockReset();
+    put.mockReset();
+    del.mockReset();
+    createHeaders.mockReset();
+  };
+
+  return { get, post, put, del, createHeaders, install, reset };
+};
+
+export async function callTool(
+  context: LoadedAppContext,
+  name: string,
+  args: Record<string, unknown> | undefined
+): Promise<ToolCallResult> {
+  const res = await context.request
+    .post('/mcp')
+    .set('Mcp-Session-Id', context.sessionId)
+    .set('Accept', 'application/json, text/event-stream')
+    .set('Content-Type', 'application/json')
+    .send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name, arguments: args ?? {} },
+    });
+
+  expect(res.status).toBe(200);
+  return res.body as ToolCallResult;
 }
 
 export function requireSessionId(header: string | string[] | undefined): string {
