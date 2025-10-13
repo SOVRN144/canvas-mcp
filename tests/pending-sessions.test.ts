@@ -1,3 +1,5 @@
+process.env.DISABLE_HTTP_LISTEN = '1';
+
 import supertest from 'supertest';
 import { app } from '../src/http.js';
 
