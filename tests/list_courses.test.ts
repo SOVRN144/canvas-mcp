@@ -1,25 +1,19 @@
-import supertest from 'supertest';
 import axios from 'axios';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { requireSessionId } from './helpers.js';
-
 import type { AxiosError, AxiosInstance } from 'axios';
 import type { Express } from 'express';
+import supertest from 'supertest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { requireSessionId } from './helpers.js';
 
 type AxiosResponseStub = { data: unknown; headers: Record<string, unknown> };
-type AxiosFnMock = ReturnType<typeof vi.fn<[string, unknown?], Promise<AxiosResponseStub>>>;
-type InterceptorUseMock = ReturnType<
-  typeof vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>
->;
 type AxiosInstanceMock = {
-  get: AxiosFnMock;
-  post: AxiosFnMock;
-  put: AxiosFnMock;
-  delete: AxiosFnMock;
+  get: ReturnType<typeof vi.fn<(url: string, config?: unknown) => Promise<AxiosResponseStub>>>;
+  post: ReturnType<typeof vi.fn<(url: string, config?: unknown) => Promise<AxiosResponseStub>>>;
+  put: ReturnType<typeof vi.fn<(url: string, config?: unknown) => Promise<AxiosResponseStub>>>;
+  delete: ReturnType<typeof vi.fn<(url: string, config?: unknown) => Promise<AxiosResponseStub>>>;
   interceptors: {
-    request: { use: InterceptorUseMock };
-    response: { use: InterceptorUseMock };
+    request: { use: ReturnType<typeof vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>> };
+    response: { use: ReturnType<typeof vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>> };
   };
   defaults: {
     baseURL: string;
@@ -39,10 +33,12 @@ describe('list_courses', () => {
     process.env.DISABLE_HTTP_LISTEN = '1';
     
     // Mock axios instance methods
-    const get = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
-    const post = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
-    const put = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
-    const del = vi.fn<[string, unknown?], Promise<AxiosResponseStub>>();
+    const viFnAxios = () =>
+      vi.fn<(url: string, config?: unknown) => Promise<AxiosResponseStub>>();
+    const get = viFnAxios();
+    const post = viFnAxios();
+    const put = viFnAxios();
+    const del = viFnAxios();
     const useRequest = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
     const useResponse = vi.fn<(onFulfilled: unknown, onRejected?: unknown) => void>();
 
