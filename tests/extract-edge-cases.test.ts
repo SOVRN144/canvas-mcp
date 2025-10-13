@@ -1,9 +1,8 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { extractErrorMessage, requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Set env before importing
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -23,6 +22,7 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 let app: Express;
@@ -112,7 +112,7 @@ describe('files/extract edge cases', () => {
     const body = (await callTool(sid, 'extract_file', { fileId: 101 })) as ToolCallResult;
 
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain');
-    expect((body?.result?.structuredContent?.blocks?.length ?? 0)).toBeGreaterThan(0);
+    expect((body?.result?.structuredContent?.blocks ?? []).length).toBeGreaterThan(0);
   });
 
   it('handles header with charset → accepted after normalization', async () => {
@@ -140,7 +140,7 @@ describe('files/extract edge cases', () => {
     const body = (await callTool(sid, 'extract_file', { fileId: 102 })) as ToolCallResult;
 
     expect(body?.result?.structuredContent?.file?.contentType).toBe('text/csv');
-    expect((body?.result?.structuredContent?.blocks?.length ?? 0)).toBeGreaterThan(0);
+    expect((body?.result?.structuredContent?.blocks ?? []).length).toBeGreaterThan(0);
   });
 
   it('throws for unknown header + no extension', async () => {
