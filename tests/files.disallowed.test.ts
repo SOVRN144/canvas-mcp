@@ -1,5 +1,5 @@
-import request from 'supertest';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import supertest from 'supertest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { extractErrorMessage, requireSessionId } from './helpers.js';
 
@@ -28,7 +28,7 @@ vi.mock('axios', () => ({
 let app: Express;
 
 async function initSession(): Promise<string> {
-  const res = await request(app)
+  const res = await supertest(app)
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')
@@ -46,7 +46,7 @@ async function callTool(
   name: string,
   args: Record<string, unknown> | undefined
 ) {
-  const res = await request(app)
+  const res = await supertest(app)
     .post('/mcp')
     .set('Mcp-Session-Id', sid)
     .set('Accept', 'application/json, text/event-stream')
@@ -68,6 +68,11 @@ describe('files/extract disallowed types', () => {
       throw new Error('HTTP module did not export app');
     }
     app = mod.app;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   it('rejects ZIP files with standardized error', async () => {

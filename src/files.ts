@@ -140,10 +140,19 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       size: buffer.length,
     };
   } catch (error) {
-    logger.error('Failed to download Canvas file', { 
-      fileId: fileMeta.id, 
-      url: fileMeta.url,
-      error: String(error) 
+    const safeUrl = (() => {
+      try {
+        const parsed = new URL(fileMeta.url);
+        parsed.search = '';
+        return parsed.toString();
+      } catch {
+        return '(redacted)';
+      }
+    })();
+    logger.error('Failed to download Canvas file', {
+      fileId: fileMeta.id,
+      url: safeUrl,
+      error: String(error),
     });
     throw new Error(`File ${fileMeta.id}: failed to download file (${String(error)})`);
   }
@@ -175,22 +184,18 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
   return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
 
-const isPdfParseFn = (
-  value: unknown
-): value is (buf: Buffer) => Promise<{ text: string }> => typeof value === 'function';
-
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule: unknown = await import('pdf-parse');
-    const candidate =
-      (pdfParseModule as { default?: unknown }).default ?? pdfParseModule;
-    if (!isPdfParseFn(candidate)) {
+    const pdfParseModule = await import('pdf-parse');
+    const maybePdfParse =
+      typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule.default;
+    if (typeof maybePdfParse !== 'function') {
       throw new Error('pdf-parse: missing callable export');
     }
-
-    const data = await candidate(buffer);
-    return normalizeWhitespace(data.text);
+    const pdfParse = maybePdfParse as (buf: Buffer) => Promise<{ text: string }>;
+    const { text } = await pdfParse(buffer);
+    return normalizeWhitespace(text);
   } catch (error) {
     logger.error('Failed to extract PDF text', { fileId, error: String(error) });
     throw new Error(`File ${fileId}: failed to extract text from PDF file`);

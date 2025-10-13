@@ -9,7 +9,7 @@
     "sourceType": "module",
     "project": "./tsconfig.json"
   },
-  "plugins": ["@typescript-eslint", "import", "security"],
+  "plugins": ["@typescript-eslint", "import", "security", "vitest"],
   "extends": [
     "eslint:recommended",
     "plugin:@typescript-eslint/recommended",
@@ -55,6 +55,11 @@
   "overrides": [
     {
       "files": ["tests/**/*.ts"],
+      "env": {
+        "vitest/globals": true,
+        "node": true
+      },
+      "extends": ["plugin:vitest/recommended"],
       "rules": {
         "@typescript-eslint/no-unsafe-argument": "off",
         "@typescript-eslint/no-unsafe-assignment": "off",

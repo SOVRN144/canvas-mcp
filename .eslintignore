@@ -4,3 +4,4 @@ coverage
 *.log
 .env
 .env.*
+src/smoke.local.ts

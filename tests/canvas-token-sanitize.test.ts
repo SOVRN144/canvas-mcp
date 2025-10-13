@@ -46,6 +46,8 @@ describe('Canvas token sanitization', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
     for (const key of Object.keys(process.env)) {
       if (!(key in ORIGINAL_ENV)) {
         delete process.env[key];

@@ -4,22 +4,21 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 import axios, { AxiosHeaders } from 'axios';
+import type { AxiosInstance } from 'axios';
 import cors from 'cors';
 import express from 'express';
+import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
-import logger from './logger.js';
-import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { getAssignment } from './canvas.js';
+import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
-import { isMain } from './util/isMain.js';
+import logger from './logger.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
-
-import type { AxiosInstance } from 'axios';
-import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
+import { isMain } from './util/isMain.js';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
@@ -687,11 +686,18 @@ const createServer = () => {
                 throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
               }
               
-              // Download file for OCR using URL from extract result
-              const { default: axios } = await import('axios');
-              const downloadResponse = await axios.get(result.file.url!, {
+              if (!result.file.url) {
+                throw new Error('OCR download URL missing from extracted file metadata');
+              }
+              const authToken = getSanitizedCanvasToken();
+              const headers: Record<string, string> = {};
+              if (authToken) {
+                headers.Authorization = `Bearer ${authToken}`;
+              }
+
+              const downloadResponse = await canvasClient.get<ArrayBuffer>(result.file.url, {
                 responseType: 'arraybuffer',
-                headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
+                headers,
               });
               const buffer = Buffer.from(downloadResponse.data);
               const dataBase64 = buffer.toString('base64');
@@ -923,6 +929,17 @@ app.use(
   })
 );
 
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (isProduction) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+  }
+  next();
+});
+
 app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (err instanceof Error && err.message === 'Not allowed by CORS') {
     res.status(403).json({
@@ -1053,7 +1070,7 @@ const closeSession = (
     }
   }
 
-  target.server.close().catch(() => {
+  void target.server.close().catch(() => {
     // ignore close errors
   });
 };
@@ -1075,7 +1092,7 @@ const getActiveSession = (sessionId: string): SessionEntry | undefined => {
       } catch {
         // ignore shutdown errors
       }
-      entry.server.close().catch(() => {
+      void entry.server.close().catch(() => {
         // ignore close errors
       });
     }
@@ -1190,7 +1207,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
             } catch {
               // ignore shutdown errors
             }
-            sessionServer.close().catch(() => {
+            void sessionServer.close().catch(() => {
               // ignore close errors
             });
           }

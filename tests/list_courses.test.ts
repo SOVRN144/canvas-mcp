@@ -1,4 +1,4 @@
-import request from 'supertest';
+import supertest from 'supertest';
 import axios from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -77,6 +77,7 @@ describe('list_courses', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.resetModules();
   });
 
@@ -88,7 +89,7 @@ describe('list_courses', () => {
     });
 
     // Initialize session
-    const init = await request(app)
+    const init = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -98,7 +99,7 @@ describe('list_courses', () => {
     expect(init.status).toBe(200);
 
     // Call list_courses tool
-    const result = await request(app)
+    const result = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -135,7 +136,7 @@ describe('list_courses', () => {
     });
 
     // Initialize session
-    const init = await request(app)
+    const init = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -145,7 +146,7 @@ describe('list_courses', () => {
     expect(init.status).toBe(200);
 
     // Call list_courses tool and expect error
-    const result = await request(app)
+    const result = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -169,7 +170,7 @@ describe('list_courses', () => {
     });
 
     // Initialize session
-    const init = await request(app)
+    const init = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -179,7 +180,7 @@ describe('list_courses', () => {
     expect(init.status).toBe(200);
 
     // Call list_courses tool and expect error
-    const result = await request(app)
+    const result = await supertest(app)
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')

@@ -1,5 +1,5 @@
 import supertest from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { requireSessionId } from './helpers.js';
 
@@ -62,6 +62,11 @@ describe('extract_file OCR', () => {
     
     expect(init.status).toBe(200);
     sessionId = requireSessionId(init.headers['mcp-session-id']);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   it('ocr:force triggers webhook', async () => {
