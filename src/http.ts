@@ -1,22 +1,23 @@
 import 'dotenv/config';
-import cors from 'cors';
-import express, { NextFunction, type Request, type Response, type ErrorRequestHandler } from 'express';
-import { isMain } from './util/isMain.js';
-import axios, { AxiosInstance, AxiosHeaders } from 'axios';
-import fs from 'node:fs/promises';
+
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import logger from './logger.js';
+import axios, { AxiosHeaders, isAxiosError } from 'axios';
+import type { AxiosInstance } from 'axios';
+import cors from 'cors';
+import express from 'express';
+import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
+import { z } from 'zod';
+import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
-import { getAssignment, type CanvasAssignment } from './canvas.js';
+import logger from './logger.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
-import { performOcr, isImageOnly, ocrDisabledHint } from './ocr.js';
-import type { OcrMode, FileAttachmentContentItem } from './types.js';
+import { isMain } from './util/isMain.js';
+import { redactUrl } from './utils/url.js';
 
 // Validate config early to fail fast on misconfiguration
 validateConfig();
@@ -28,7 +29,7 @@ if (IS_MAIN) {
   process.on('uncaughtException', (err) => {
     logger.error('uncaughtException during server startup', {
       error: String(err),
-      stack: (err as any)?.stack ?? null,
+      stack: err instanceof Error ? err.stack : null,
     });
     process.exit(1);
   });
@@ -114,7 +115,7 @@ const logCanvasErrorEvent = (details: {
     status: details.status ?? null,
     statusText: details.statusText ?? null,
     details: details.details,
-    url: details.url ?? null,
+    url: details.url ? redactUrl(details.url) : null,
   });
 };
 
@@ -123,12 +124,16 @@ const parseCanvasErrors = (data: unknown): string | null => {
     return null;
   }
   const anyData = data as Record<string, unknown>;
-  if (Array.isArray(anyData.errors)) {
-    return anyData.errors
-      .map((err) => {
+  const errors = anyData.errors;
+  if (Array.isArray(errors)) {
+    return errors
+      .map((err: unknown) => {
         if (typeof err === 'string') return err;
-        if (err && typeof err === 'object' && 'message' in err && typeof err.message === 'string') {
-          return err.message;
+        if (err && typeof err === 'object' && 'message' in err) {
+          const message = (err as { message?: unknown }).message;
+          if (typeof message === 'string') {
+            return message;
+          }
         }
         return JSON.stringify(err);
       })
@@ -144,7 +149,7 @@ const raiseCanvasError = (error: unknown): never => {
   const timestamp = new Date().toISOString();
   const safeMessage = 'Canvas request failed; check server logs for details';
 
-  if (axios.isAxiosError(error)) {
+  if (isAxiosError(error)) {
     const status = error.response?.status;
     const statusText = error.response?.statusText;
     const details = parseCanvasErrors(error.response?.data);
@@ -157,7 +162,7 @@ const raiseCanvasError = (error: unknown): never => {
       status: status ?? null,
       statusText: statusText ?? null,
       details: details || fallback,
-      ...(error.config?.url ? { url: error.config.url } : {}),
+      ...(error.config?.url ? { url: redactUrl(error.config.url) } : {}),
       timestamp,
     });
 
@@ -236,9 +241,9 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
       seenPaths.add(normalizedPath);
 
       const response = query !== undefined
-        ? await canvasClient.get(currentUrl.toString(), { params: query })
-        : await canvasClient.get(currentUrl.toString());
-      const data = response.data as unknown;
+        ? await canvasClient.get<unknown>(currentUrl.toString(), { params: query })
+        : await canvasClient.get<unknown>(currentUrl.toString());
+      const data = response.data;
       if (!Array.isArray(data)) {
         const msg = parseCanvasErrors(data) || `Unexpected Canvas response for ${url}`;
         throw new Error(msg);
@@ -248,7 +253,9 @@ const getAll = async <T>(url: string, params?: Record<string, unknown>): Promise
         throw new Error(`Pagination exceeded maximum result limit (${MAX_RESULTS}).`);
       }
       results.push(...pageData);
-      const next = parseNextLink(response.headers['link'] ?? response.headers['Link']);
+      const headers = response.headers as Record<string, unknown>;
+      const rawLinkHeader = headers['link'] ?? headers['Link'];
+      const next = typeof rawLinkHeader === 'string' ? parseNextLink(rawLinkHeader) : null;
       if (!next) {
         break;
       }
@@ -274,7 +281,8 @@ const redactSessionId = (value: string): string => {
   return value.length <= 8 ? value : `${value.slice(0, 8)}…`;
 };
 
-const fallbackSessionKey = (req: Request) => ipKeyGenerator(req.ip ?? '');
+const fallbackSessionKey = (req: Request) =>
+  ipKeyGenerator(req as unknown as Parameters<typeof ipKeyGenerator>[0]);
 
 const jsonParseErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
   if (err instanceof SyntaxError && typeof (err as { type?: unknown }).type === 'string') {
@@ -285,7 +293,7 @@ const jsonParseErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
         id = (req.body as Record<string, unknown>).id ?? null;
       } else if (typeof (err as { body?: unknown }).body === 'string') {
         try {
-          const parsed = JSON.parse((err as { body?: string }).body ?? '');
+          const parsed: unknown = JSON.parse((err as { body?: string }).body ?? '');
           if (parsed && typeof parsed === 'object') {
             id = (parsed as Record<string, unknown>).id ?? null;
           }
@@ -668,6 +676,9 @@ const createServer = () => {
           const fullText = result.blocks.map(b => b.text).join('\n\n');
           const isPdf = result.file.contentType === 'application/pdf';
           
+          // Lazy-load OCR helpers only when needed to satisfy noUnusedLocals and keep cold path light
+          const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
+          
           // Handle OCR logic
           if (isPdf && ocr !== 'off') {
             const needsOcr = ocr === 'force' || isImageOnly(fullText);
@@ -681,11 +692,18 @@ const createServer = () => {
                 throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
               }
               
-              // Download file for OCR using URL from extract result
-              const { default: axios } = await import('axios');
-              const downloadResponse = await axios.get(result.file.url!, {
+              if (!result.file.url) {
+                throw new Error('OCR download URL missing from extracted file metadata');
+              }
+              const authToken = getSanitizedCanvasToken();
+              const headers: Record<string, string> = {};
+              if (authToken) {
+                headers.Authorization = `Bearer ${authToken}`;
+              }
+
+              const downloadResponse = await canvasClient.get<ArrayBuffer>(result.file.url, {
                 responseType: 'arraybuffer',
-                headers: { Authorization: `Bearer ${getSanitizedCanvasToken()}` },
+                headers,
               });
               const buffer = Buffer.from(downloadResponse.data);
               const dataBase64 = buffer.toString('base64');
@@ -790,8 +808,7 @@ const createServer = () => {
             const attachmentText = `Attached file (via URL): ${name} (${sizeMB} MB, ${content_type})`;
             
             // Redact query params from URL for logging
-            const urlForLog = url.split('?')[0];
-            logger.info('Returning large file URL', { fileId: id, size, urlPreview: urlForLog });
+            logger.info('Returning large file URL', { fileId: id, size, urlPreview: redactUrl(url) });
             
             return {
               content: [{ type: 'text', text: attachmentText }],
@@ -872,14 +889,14 @@ const toolsCallLimiter = rateLimit({
   identifier: 'tools-call',
   keyGenerator: (req) => {
     const rawSessionId = req.header(MCP_SESSION_HEADER);
-    const sessionId = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
-    if (sessionId && sessionId.trim().length > 0) {
+    const sessionId = typeof rawSessionId === 'string' ? rawSessionId : rawSessionId?.[0];
+    if (typeof sessionId === 'string' && sessionId.trim().length > 0) {
       return sessionId.trim();
     }
     return fallbackSessionKey(req);
   },
   skip: (req) => {
-    const body = req.body;
+    const body = req.body as unknown;
     if (typeof body !== 'object' || body === null) {
       return true;
     }
@@ -887,8 +904,11 @@ const toolsCallLimiter = rateLimit({
     return method !== 'tools/call';
   },
   handler: (req, res) => {
+    const requestBody = req.body as unknown;
     const id =
-      typeof req.body === 'object' && req.body !== null ? (req.body as Record<string, unknown>).id ?? null : null;
+      typeof requestBody === 'object' && requestBody !== null
+        ? (requestBody as Record<string, unknown>).id ?? null
+        : null;
     res.status(429).json(buildJsonRpcError('Session rate limit exceeded', id));
   },
 });
@@ -916,6 +936,17 @@ app.use(
     callback(new Error('Not allowed by CORS'));
   })
 );
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (isProduction) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+  }
+  next();
+});
 
 app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (err instanceof Error && err.message === 'Not allowed by CORS') {
@@ -1041,13 +1072,13 @@ const closeSession = (
 
   if (!options.initiatedByTransport) {
     try {
-      target.transport.close();
+      void target.transport.close();
     } catch {
       // ignore shutdown errors
     }
   }
 
-  target.server.close().catch(() => {
+  void target.server.close().catch(() => {
     // ignore close errors
   });
 };
@@ -1065,11 +1096,11 @@ const getActiveSession = (sessionId: string): SessionEntry | undefined => {
       closeSession(sessionId, entry);
     } else {
       try {
-        entry.transport.close();
+        void entry.transport.close();
       } catch {
         // ignore shutdown errors
       }
-      entry.server.close().catch(() => {
+      void entry.server.close().catch(() => {
         // ignore close errors
       });
     }
@@ -1092,9 +1123,10 @@ setInterval(() => {
 app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Response) => {
   try {
     const sessionId = req.header(MCP_SESSION_HEADER) ?? '';
+    const requestBody = req.body as unknown;
     const requestId =
-      req.body && typeof req.body === 'object'
-        ? (req.body as Record<string, unknown>).id ?? null
+      typeof requestBody === 'object' && requestBody !== null
+        ? (requestBody as Record<string, unknown>).id ?? null
         : null;
     if (shuttingDown) {
       res.status(503).json({
@@ -1119,7 +1151,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
         });
         return;
       }
-      if (!isInitialize(req.body)) {
+      if (!isInitialize(requestBody)) {
         res.status(400).json({
           jsonrpc: '2.0',
           error: {
@@ -1172,7 +1204,7 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
 
       const run = async () => {
         await sessionServer.connect(transport);
-        const payload = normalizeInitializePayload(req.body);
+        const payload = normalizeInitializePayload(requestBody);
         try {
           await transport.handleRequest(asNode(req), asNodeRes(res), payload);
         } catch (error) {
@@ -1180,11 +1212,11 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
             closeSession(initializedSessionId);
           } else {
             try {
-              transport.close();
+              void transport.close();
             } catch {
               // ignore shutdown errors
             }
-            sessionServer.close().catch(() => {
+            void sessionServer.close().catch(() => {
               // ignore close errors
             });
           }
@@ -1213,12 +1245,12 @@ app.post('/mcp', mcpJsonParser, toolsCallLimiter, async (req: Request, res: Resp
     }
 
     existing.lastSeen = Date.now();
-    await existing.transport.handleRequest(asNode(req), asNodeRes(res), req.body);
+    await existing.transport.handleRequest(asNode(req), asNodeRes(res), requestBody);
   } catch (error) {
     if (!res.headersSent) {
       const message = error instanceof Error ? error.message : String(error);
       const requestId =
-        req.body && typeof req.body === 'object'
+        typeof req.body === 'object' && req.body !== null
           ? (req.body as Record<string, unknown>).id ?? null
           : null;
       res.status(500).json({

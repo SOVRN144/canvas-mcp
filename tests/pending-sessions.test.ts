@@ -1,4 +1,6 @@
-import request from 'supertest';
+process.env.DISABLE_HTTP_LISTEN = '1';
+
+import supertest from 'supertest';
 import { app } from '../src/http.js';
 
 describe('pending session races', () => {
@@ -8,14 +10,15 @@ describe('pending session races', () => {
       method: 'initialize',
       params: { protocolVersion: '2024-11-05' },
     };
+    const client = supertest(app);
 
-    const init1 = request(app)
+    const init1 = client
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
       .send({ ...initPayload, id: 1 });
 
-    const init2 = request(app)
+    const init2 = client
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')

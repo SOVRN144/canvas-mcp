@@ -1,4 +1,4 @@
-import request from 'supertest';
+import supertest from 'supertest';
 
 process.env.DISABLE_HTTP_LISTEN = '1';
 
@@ -12,6 +12,7 @@ const ci = (msg: string) => console.log(msg);
 
 (async () => {
   const app = await loadApp();
+  const client = supertest(app);
   let pass = true;
   let healthOk = false;
   let initOk = false;
@@ -25,20 +26,20 @@ const ci = (msg: string) => console.log(msg);
   let afterOk = false;
 
   ci('### /healthz');
-  const health = await request(app).get('/healthz');
+  const health = await client.get('/healthz');
   healthOk = health.status === 200 && typeof health.body === 'object';
   if (!healthOk) pass = false;
   console.log({ status: health.status, body: health.body });
 
   ci('### GET /mcp (missing session)');
-  const getMissing = await request(app).get('/mcp');
+  const getMissing = await client.get('/mcp');
   const missingMessage = getMissing.body?.error?.message ?? '';
   getMissingOk = getMissing.status === 400 && /missing session id/i.test(missingMessage);
   if (!getMissingOk) pass = false;
   console.log({ status: getMissing.status, body: getMissing.body });
 
   ci('### initialize');
-  const init = await request(app)
+  const init = await client
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')
@@ -51,20 +52,29 @@ const ci = (msg: string) => console.log(msg);
   const sessionId = sessionHeader ?? '';
 
   ci('### tools/list');
-  const list = await request(app)
+  const list = await client
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')
     .set('Mcp-Session-Id', sessionId)
     .send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-  const tools = Array.isArray(list.body?.result?.tools) ? list.body.result.tools : [];
-  listOk = list.status === 200 && tools.some((tool: any) => tool?.name === 'echo');
+  const tools: unknown[] = Array.isArray(list.body?.result?.tools) ? list.body.result.tools : [];
+  const toolNames = tools
+    .map((tool: unknown) => {
+      if (tool && typeof tool === 'object' && 'name' in tool) {
+        const name = (tool as { name?: unknown }).name;
+        return typeof name === 'string' ? name : undefined;
+      }
+      return undefined;
+    })
+    .filter((name): name is string => typeof name === 'string');
+  listOk = list.status === 200 && toolNames.includes('echo');
   if (!listOk) pass = false;
-  console.log({ status: list.status, tools: tools.map((t: any) => t?.name) });
+  console.log({ status: list.status, tools: toolNames });
 
-  if (tools.some((tool: any) => tool?.name === 'list_courses')) {
+  if (toolNames.includes('list_courses')) {
     ci('### tools/call list_courses');
-    const listCourses = await request(app)
+    const listCourses = await client
       .post('/mcp')
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
@@ -79,7 +89,7 @@ const ci = (msg: string) => console.log(msg);
   }
 
   ci('### tools/call echo (ok)');
-  const echo = await request(app)
+  const echo = await client
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')
@@ -91,7 +101,7 @@ const ci = (msg: string) => console.log(msg);
   console.log({ status: echo.status, echoText });
 
   ci('### tools/call echo (bad args)');
-  const bad = await request(app)
+  const bad = await client
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')
@@ -102,7 +112,7 @@ const ci = (msg: string) => console.log(msg);
   console.log({ status: bad.status, body: bad.body });
 
   ci('### GET /mcp (invalid session)');
-  const getInvalid = await request(app)
+  const getInvalid = await client
     .get('/mcp')
     .set('Mcp-Session-Id', `${sessionId}-invalid`);
   const invalidGetMessage = getInvalid.body?.error?.message ?? '';
@@ -111,13 +121,13 @@ const ci = (msg: string) => console.log(msg);
   console.log({ status: getInvalid.status, body: getInvalid.body });
 
   ci('### DELETE /mcp');
-  const del = await request(app).delete('/mcp').set('Mcp-Session-Id', sessionId);
+  const del = await client.delete('/mcp').set('Mcp-Session-Id', sessionId);
   delOk = del.status === 204;
   if (!delOk) pass = false;
   console.log({ status: del.status });
 
   ci('### DELETE /mcp (invalid session)');
-  const deleteInvalid = await request(app)
+  const deleteInvalid = await client
     .delete('/mcp')
     .set('Mcp-Session-Id', `${sessionId}-invalid`);
   const invalidDeleteMessage = deleteInvalid.body?.error?.message ?? '';
@@ -126,7 +136,7 @@ const ci = (msg: string) => console.log(msg);
   console.log({ status: deleteInvalid.status, body: deleteInvalid.body });
 
   ci('### tools/list after delete (should error)');
-  const after = await request(app)
+  const after = await client
     .post('/mcp')
     .set('Accept', 'application/json, text/event-stream')
     .set('Content-Type', 'application/json')

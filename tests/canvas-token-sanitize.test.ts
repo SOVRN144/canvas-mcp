@@ -1,53 +1,94 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios, { AxiosHeaders } from 'axios';
+import type { AxiosInstance, CreateAxiosDefaults } from 'axios';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config, getSanitizedCanvasToken } from '../src/config.js';
+import { getCanvasClient } from '../src/http.js';
 
-const ORIGINAL_ENV = { ...process.env };
+const ORIGINAL_TOKEN = config.canvasToken;
+const ORIGINAL_BASE_URL = config.canvasBaseUrl;
 
-const loadServer = async () => {
-  await import('../src/http');
+type AxiosFn = (url: string, config?: unknown) => Promise<unknown>;
+
+const noopAxiosFn: AxiosFn = () => Promise.resolve({});
+
+const extractAuthorization = (headers: unknown): string | undefined => {
+  const keys = ['authorization', 'Authorization', 'AUTHORIZATION'];
+  const pickString = (value: unknown): string | undefined => {
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.find((entry): entry is string => typeof entry === 'string');
+    }
+    return undefined;
+  };
+
+  if (headers instanceof AxiosHeaders) {
+    for (const key of keys) {
+      const val = headers.get?.(key as never);
+      const resolved = pickString(val);
+      if (resolved) {
+        return resolved;
+      }
+    }
+    return undefined;
+  }
+
+  if (headers && typeof headers === 'object') {
+    const dict = headers as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(dict, 'authorization')) {
+      const resolved = pickString(dict.authorization);
+      if (resolved) return resolved;
+    }
+    if (Object.prototype.hasOwnProperty.call(dict, 'Authorization')) {
+      const resolved = pickString(dict.Authorization);
+      if (resolved) return resolved;
+    }
+    if (Object.prototype.hasOwnProperty.call(dict, 'AUTHORIZATION')) {
+      const resolved = pickString(dict.AUTHORIZATION);
+      if (resolved) return resolved;
+    }
+  }
+  return undefined;
 };
 
 describe('Canvas token sanitization', () => {
+  let capturedConfig: CreateAxiosDefaults | undefined;
+
   beforeEach(() => {
-    vi.resetModules();
-    vi.restoreAllMocks();
-    for (const key of Object.keys(process.env)) {
-      delete process.env[key];
-    }
-    Object.assign(process.env, ORIGINAL_ENV);
+    capturedConfig = undefined;
     process.env.CANVAS_BASE_URL = 'https://example.instructure.com';
     process.env.CANVAS_TOKEN = '  abc123\n';
+    config.canvasBaseUrl = 'https://example.instructure.com';
+    config.canvasToken = '  abc123\n';
+
+    vi.spyOn(axios, 'create').mockImplementation((defaults?: CreateAxiosDefaults) => {
+      capturedConfig = defaults;
+      return {
+        defaults: { headers: defaults?.headers },
+        get: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        post: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        put: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        delete: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+      } as unknown as AxiosInstance;
+    });
   });
 
   afterEach(() => {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in ORIGINAL_ENV)) {
-        delete process.env[key];
-      }
-    }
-    Object.assign(process.env, ORIGINAL_ENV);
+    vi.restoreAllMocks();
+    config.canvasBaseUrl = ORIGINAL_BASE_URL;
+    config.canvasToken = ORIGINAL_TOKEN;
+    delete process.env.CANVAS_BASE_URL;
+    delete process.env.CANVAS_TOKEN;
   });
 
-  it('uses trimmed CANVAS_TOKEN when building Authorization headers', async () => {
-    let capturedConfig: any;
-    vi.spyOn(axios, 'create').mockImplementation((config?: any) => {
-      capturedConfig = config;
-      return {
-        defaults: { headers: config?.headers ?? undefined },
-        get: vi.fn(),
-      } as any;
-    });
+  it('trims Canvas token before creating the client', () => {
+    expect(getSanitizedCanvasToken()).toBe('abc123');
 
-    await loadServer();
-
+    const client = getCanvasClient();
+    expect(client).toBeTruthy();
     expect(capturedConfig).toBeTruthy();
-    const headers = capturedConfig?.headers as AxiosHeaders | Record<string, any> | undefined;
-    const authHeader =
-      (headers as AxiosHeaders | undefined)?.get?.('Authorization') ??
-      (headers as AxiosHeaders | undefined)?.get?.('authorization') ??
-      (headers as AxiosHeaders | undefined)?.get?.('AUTHORIZATION') ??
-      (headers as Record<string, any> | undefined)?.Authorization ??
-      (headers as Record<string, any> | undefined)?.authorization;
-    expect(authHeader).toBe('Bearer abc123');
+    const auth = extractAuthorization(capturedConfig?.headers);
+    expect(auth).toBe('Bearer abc123');
   });
 });

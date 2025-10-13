@@ -1,8 +1,11 @@
-import axios, { type AxiosInstance } from 'axios';
-import logger from './logger.js';
-import mammoth from 'mammoth';
+import axios from 'axios';
+import type { AxiosInstance } from 'axios';
 import JSZip from 'jszip';
+import mammoth from 'mammoth';
 import { getSanitizedCanvasToken } from './config.js';
+import logger from './logger.js';
+import { redactUrl } from './utils/url.js';
+
 
 /**
  * Throws a standardized error for file processing failures.
@@ -88,7 +91,7 @@ type DownloadResult = {
  */
 export async function getCanvasFileMeta(canvasClient: AxiosInstance, fileId: number): Promise<CanvasFile> {
   try {
-    const response = await canvasClient.get(`/api/v1/files/${fileId}`);
+    const response = await canvasClient.get<CanvasFile>(`/api/v1/files/${fileId}`);
     return response.data;
   } catch (error) {
     logger.error('Failed to get Canvas file metadata', { fileId, error: String(error) });
@@ -118,8 +121,8 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       maxRedirects: 5,
     });
 
-    const buffer = Buffer.from(response.data);
-    const contentType = response.headers['content-type'] || fileMeta.content_type || 'application/octet-stream';
+    const buffer = Buffer.from(response.data as ArrayBuffer);
+    const contentType = (response.headers['content-type'] as string | undefined) || fileMeta.content_type || 'application/octet-stream';
     
     // Validate downloaded size and warn on mismatch
     const tolerance = 1024; // 1KB
@@ -138,10 +141,10 @@ export async function downloadCanvasFile(fileMeta: CanvasFile): Promise<{ buffer
       size: buffer.length,
     };
   } catch (error) {
-    logger.error('Failed to download Canvas file', { 
-      fileId: fileMeta.id, 
-      url: fileMeta.url,
-      error: String(error) 
+    logger.error('Failed to download Canvas file', {
+      fileId: fileMeta.id,
+      url: redactUrl(fileMeta.url),
+      error: String(error),
     });
     throw new Error(`File ${fileMeta.id}: failed to download file (${String(error)})`);
   }
@@ -176,14 +179,15 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
 async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
   try {
     // Dynamic ESM import to work in CI/runtime (no top-level require)
-    const pdfParseModule = await import('pdf-parse') as any;
-    const pdfParseFn = (pdfParseModule?.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
-    if (typeof pdfParseFn !== 'function') {
+    const mod: unknown = await import('pdf-parse');
+    const maybe =
+      typeof mod === 'function' ? mod : (mod as { default?: unknown }).default;
+    if (typeof maybe !== 'function') {
       throw new Error('pdf-parse: missing callable export');
     }
-
-    const data = await pdfParseFn(buffer);
-    return normalizeWhitespace(data.text);
+    const pdfParse = maybe as (buf: Buffer) => Promise<{ text: string }>;
+    const { text } = await pdfParse(buffer);
+    return normalizeWhitespace(text);
   } catch (error) {
     logger.error('Failed to extract PDF text', { fileId, error: String(error) });
     throw new Error(`File ${fileId}: failed to extract text from PDF file`);
@@ -208,7 +212,8 @@ async function extractDocxText(buffer: Buffer, fileId: number): Promise<string> 
  */
 async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileContentBlock[]> {
   try {
-    const zip = await JSZip.loadAsync(buffer);
+    // Buffer extends Uint8Array, which JSZip accepts
+    const zip = await JSZip.loadAsync(buffer as Uint8Array);
     const blocks: FileContentBlock[] = [];
     
     // Extract slide content from PPTX structure
@@ -221,6 +226,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
     }
     
     for (const slideFile of slideFiles) {
+      // eslint-disable-next-line security/detect-object-injection
       const file = zip.files[slideFile];
       if (!file) fail(fileId, `slide not found (${slideFile})`);
       const slideXml = await file.async('text');

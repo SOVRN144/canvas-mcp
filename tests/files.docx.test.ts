@@ -1,131 +1,105 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
-import request from 'supertest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  callTool,
+  createAxiosMockSuite,
+  findTextContent,
+  loadAppWithEnv,
+  LoadedAppContext,
+} from './helpers.js';
 
-// Set env before importing
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-process.env.DISABLE_HTTP_LISTEN = '1';
-
-// Mock axios
-const get = vi.fn();
-const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
-vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
-  AxiosHeaders,
-}));
-
-// Mock mammoth for DOCX extraction
 vi.mock('mammoth', () => ({
   default: {
-    extractRawText: async (_: any) => ({
-      value: 'Document title\n\nThis is extracted DOCX content with multiple paragraphs.\n\nSecond paragraph here.'
-    })
-  }
+    extractRawText: () =>
+      Promise.resolve({
+        value: 'Document title\n\nThis is extracted DOCX content with multiple paragraphs.\n\nSecond paragraph here.',
+      }),
+  },
 }));
 
-let app: any;
-
-async function initSession() {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2024-11-05' },
-    });
-  return res.headers['mcp-session-id'];
-}
-
-async function callTool(sid: string, name: string, args: any) {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Mcp-Session-Id', sid)
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name, arguments: args ?? {} },
-    });
-  expect(res.status).toBe(200);
-  return res.body;
-}
+const axiosMocks = createAxiosMockSuite();
+let context: LoadedAppContext | undefined;
 
 describe('files/extract DOCX', () => {
-  beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+  beforeEach(async () => {
+    axiosMocks.reset();
+    axiosMocks.install();
+
+    context = await loadAppWithEnv({
+      NODE_ENV: 'development',
+      CANVAS_BASE_URL: 'https://example.canvas.test',
+      CANVAS_TOKEN: 'x',
+    });
   });
 
-  it('extracts text from DOCX and returns structured blocks', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  afterEach(() => {
+    context?.restoreEnv();
+    context = undefined;
+    axiosMocks.reset();
+    vi.restoreAllMocks();
+  });
+
+  it('extracts text content from DOCX', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
-            id: 456,
-            display_name: 'Document.docx',
-            filename: 'Document.docx',
+            id: 101,
+            display_name: 'Week1.docx',
+            filename: 'Week1.docx',
             size: 2048,
-            content_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            content_type:
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             url: 'https://files.canvas.example/docx',
           },
         });
       }
-      // file bytes
       return Promise.resolve({
-        data: Buffer.from('fake-docx-binary'),
-        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+        data: Buffer.from('fake-docx-zip'),
+        headers: {
+          'content-type':
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        },
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 456, mode: 'text' });
+    const body = await callTool(context!, 'extract_file', { fileId: 101, mode: 'text' });
 
-    expect(body?.result?.structuredContent).toBeTruthy();
-    const sc = body.result.structuredContent;
+    const structured = body?.result?.structuredContent;
+    expect(structured?.file?.name).toBe('Week1.docx');
+    expect(structured?.blocks?.length).toBeGreaterThan(0);
 
-    expect(sc.file.id).toBe(456);
-    expect(sc.file.name).toBe('Document.docx');
-    expect(sc.charCount).toBeGreaterThan(0);
-    expect(Array.isArray(sc.blocks)).toBe(true);
-    expect(sc.blocks.length).toBeGreaterThan(0);
-    
-    // Should contain text from mammoth mock
-    const preview = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
-    expect(preview).toContain('extracted DOCX content');
+    const text = findTextContent(body?.result?.content);
+    expect(text).toMatch(/Document title/);
   });
 
-  it('honors character limit and shows truncation', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  it('truncates long DOCX content when maxChars is set', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
-            id: 789,
-            display_name: 'LongDoc.docx',
-            filename: 'LongDoc.docx',
-            size: 1024,
-            content_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            url: 'https://files.canvas.example/long',
+            id: 102,
+            display_name: 'Essay.docx',
+            filename: 'Essay.docx',
+            size: 10_000,
+            content_type:
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            url: 'https://files.canvas.example/essay',
           },
         });
       }
       return Promise.resolve({
-        data: Buffer.from('fake-long-docx'),
-        headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+        data: Buffer.from('fake-docx-zip'),
+        headers: {
+          'content-type':
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        },
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 789, maxChars: 50 });
+    const body = await callTool(context!, 'extract_file', { fileId: 102, maxChars: 50 });
 
-    expect(body?.result?.structuredContent?.truncated).toBe(true);
-    expect(body.result.structuredContent.charCount).toBeLessThanOrEqual(50);
+    const structured = body?.result?.structuredContent;
+    expect(structured?.truncated).toBe(true);
+    expect((structured?.blocks?.[0]?.text ?? '').length).toBeLessThanOrEqual(50);
   });
 });

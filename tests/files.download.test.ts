@@ -1,84 +1,47 @@
-process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-process.env.DISABLE_HTTP_LISTEN = '1';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  callTool,
+  createAxiosMockSuite,
+  extractErrorMessage,
+  findTextContent,
+  loadAppWithEnv,
+  LoadedAppContext,
+} from './helpers.js';
 
-import { describe, it, beforeAll, expect, vi } from 'vitest';
-import request from 'supertest';
-
-// Mock axios
-const get = vi.fn();
-const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
-vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
-  AxiosHeaders,
-}));
-
-let app: any;
-
-async function initSession() {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2024-11-05' },
-    });
-  return res.headers['mcp-session-id'];
-}
-
-async function callTool(sid: string, name: string, args: any) {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Mcp-Session-Id', sid)
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name, arguments: args ?? {} },
-    });
-  expect(res.status).toBe(200);
-  return res.body;
-}
-
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
-}
+const axiosMocks = createAxiosMockSuite();
+let context: LoadedAppContext | undefined;
 
 describe('files/download (download_file)', () => {
-  beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+  beforeEach(async () => {
+    axiosMocks.reset();
+    axiosMocks.install();
+
+    context = await loadAppWithEnv({
+      NODE_ENV: 'development',
+      CANVAS_BASE_URL: 'https://example.canvas.test',
+      CANVAS_TOKEN: 'x',
+    });
+  });
+
+  afterEach(() => {
+    context?.restoreEnv();
+    context = undefined;
+    axiosMocks.reset();
+    vi.restoreAllMocks();
   });
 
   it('returns a base64 attachment when under limit', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
             id: 777,
             display_name: 'Week1.pptx',
             filename: 'Week1.pptx',
-            size: 1024 * 100, // 100 KB
+            size: 1024 * 100,
             content_type:
               'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            url: 'https://files.canvas.example/pptx',
+            url: 'https://files.canvas.example/pptx?token=secret',
           },
         });
       }
@@ -91,30 +54,30 @@ describe('files/download (download_file)', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'download_file', { fileId: 777, maxSize: 1024 * 1024 });
+    const body = await callTool(context!, 'download_file', { fileId: 777, maxSize: 1024 * 1024 });
 
-    expect(body?.result?.structuredContent?.file).toBeTruthy();
-    const file = body.result.structuredContent.file;
-    expect(file.name).toBe('Week1.pptx');
-    expect(typeof file.dataBase64).toBe('string');
-    expect(file.dataBase64.length).toBeGreaterThan(0);
+    const file = body?.result?.structuredContent?.file as {
+      name?: string;
+      dataBase64?: string;
+    } | undefined;
+    expect(file).toBeTruthy();
+    expect(file?.name).toBe('Week1.pptx');
+    expect(typeof file?.dataBase64).toBe('string');
+    expect(file?.dataBase64?.length ?? 0).toBeGreaterThan(0);
 
-    // Also expect a human text line
-    const text = body.result.content?.find((c: any) => c.type === 'text')?.text || '';
+    const text = findTextContent(body?.result?.content);
     expect(text).toMatch(/Attached file/i);
   });
 
   it('rejects when file exceeds maxSize', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
             id: 888,
             display_name: 'Big.pptx',
             filename: 'Big.pptx',
-            size: 10 * 1024 * 1024, // 10 MB
+            size: 10 * 1024 * 1024,
             content_type:
               'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             url: 'https://files.canvas.example/bigpptx',
@@ -130,10 +93,9 @@ describe('files/download (download_file)', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'download_file', { fileId: 888, maxSize: 1024 }); // 1 KB
+    const body = await callTool(context!, 'download_file', { fileId: 888, maxSize: 1024 });
 
-    const errorMessage = getErrorMessage(body);
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/too large|maxSize|extract_file/i);
   });

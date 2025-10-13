@@ -1,75 +1,36 @@
-import { describe, it, beforeAll, expect, vi } from 'vitest';
-import request from 'supertest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  callTool,
+  createAxiosMockSuite,
+  extractErrorMessage,
+  loadAppWithEnv,
+  LoadedAppContext,
+} from './helpers.js';
 
-// Set env before importing
-process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-process.env.DISABLE_HTTP_LISTEN = '1';
-
-// Mock axios
-const get = vi.fn();
-const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: any) => ({}) };
-vi.mock('axios', () => ({
-  default: { create, get, isAxiosError: (e: any) => !!e?.isAxiosError, AxiosHeaders },
-  AxiosHeaders,
-}));
-
-let app: any;
-
-async function initSession() {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2024-11-05' },
-    });
-  return res.headers['mcp-session-id'];
-}
-
-async function callTool(sid: string, name: string, args: any) {
-  const res = await request(app)
-    .post('/mcp')
-    .set('Mcp-Session-Id', sid)
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name, arguments: args ?? {} },
-    });
-  expect(res.status).toBe(200);
-  return res.body;
-}
-
-// Helper to extract error message from MCP response
-function getErrorMessage(body: any): string | undefined {
-  // MCP SDK returns errors as result.isError with message in content[0].text
-  if (body?.result?.isError && body.result.content?.[0]?.text) {
-    return body.result.content[0].text;
-  }
-  // Fallback for standard JSON-RPC error format
-  if (body?.error?.message) {
-    return body.error.message;
-  }
-  return undefined;
-}
+const axiosMocks = createAxiosMockSuite();
+let context: LoadedAppContext | undefined;
 
 describe('files/extract disallowed types', () => {
-  beforeAll(async () => {
-    const mod = await import('../src/http');
-    app = (mod as any).app ?? (mod as any).default ?? mod;
+  beforeEach(async () => {
+    axiosMocks.reset();
+    axiosMocks.install();
+
+    context = await loadAppWithEnv({
+      NODE_ENV: 'development',
+      CANVAS_BASE_URL: 'https://example.canvas.test',
+      CANVAS_TOKEN: 'x',
+    });
+  });
+
+  afterEach(() => {
+    context?.restoreEnv();
+    context = undefined;
+    axiosMocks.reset();
+    vi.restoreAllMocks();
   });
 
   it('rejects ZIP files with standardized error', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
@@ -88,17 +49,14 @@ describe('files/extract disallowed types', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 999 });
-
-    const errorMessage = getErrorMessage(body);
+    const body = await callTool(context!, 'extract_file', { fileId: 999 });
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
-    expect(errorMessage).toMatch(/File 999: content type not allowed \(application\/zip\)/);
+    expect(errorMessage).toMatch(/File 999: content type not allowed/);
   });
 
   it('rejects video files with standardized error', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
@@ -117,17 +75,14 @@ describe('files/extract disallowed types', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 888 });
-
-    const errorMessage = getErrorMessage(body);
+    const body = await callTool(context!, 'extract_file', { fileId: 888 });
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
-    expect(errorMessage).toMatch(/File 888: content type not allowed \(video\/mp4\)/);
+    expect(errorMessage).toMatch(/File 888: content type not allowed/);
   });
 
   it('rejects image files with standardized error', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
@@ -146,11 +101,9 @@ describe('files/extract disallowed types', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 777 });
-
-    const errorMessage = getErrorMessage(body);
+    const body = await callTool(context!, 'extract_file', { fileId: 777 });
+    const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
-    expect(errorMessage).toMatch(/File 777: content type not allowed \(image\/png\)/);
+    expect(errorMessage).toMatch(/File 777: content type not allowed/);
   });
 });

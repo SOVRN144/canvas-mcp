@@ -1,6 +1,6 @@
 // src/sanitize.ts
-import sanitizeHtml from 'sanitize-html';
 import he from 'he';
+import sanitizeHtml from 'sanitize-html';
 
 /** Opinionated, safe default sanitizer for Canvas assignment descriptions. */
 export function sanitizeHtmlSafe(input: string, opts?: Partial<sanitizeHtml.IOptions>): string {
@@ -19,7 +19,7 @@ export function sanitizeHtmlSafe(input: string, opts?: Partial<sanitizeHtml.IOpt
     },
     allowedSchemes: ['http','https','mailto'],
     transformTags: {
-      a: (tagName, attribs) => {
+      a: (_tagName, attribs) => {
         const rel = attribs.rel?.toLowerCase() || '';
         const set = new Set(rel.split(/\s+/).filter(Boolean));
         ['noopener','noreferrer','nofollow'].forEach(x => set.add(x));
