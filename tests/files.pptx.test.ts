@@ -1,9 +1,9 @@
+import type { Express } from 'express';
+/* eslint-disable @typescript-eslint/unbound-method */
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { extractErrorMessage, requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Set env before importing
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -23,6 +23,7 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 vi.mock('jszip', () => {
@@ -91,11 +92,13 @@ describe('files/extract PPTX', () => {
     const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: async () =>
-            '<a:t>Introduction Slide</a:t><a:t>Welcome to the course</a:t><a:t>Key concepts overview</a:t>',
+          async: () =>
+            Promise.resolve(
+              '<a:t>Introduction Slide</a:t><a:t>Welcome to the course</a:t><a:t>Key concepts overview</a:t>'
+            ),
         },
         'ppt/slides/slide2.xml': {
-          async: async () => '<a:t>Next Slide</a:t>',
+          async: () => Promise.resolve('<a:t>Next Slide</a:t>'),
         },
       },
     };
@@ -152,7 +155,7 @@ describe('files/extract PPTX', () => {
     const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: async () => '<a:t>Fallback Detection</a:t>',
+          async: () => Promise.resolve('<a:t>Fallback Detection</a:t>'),
         },
       },
     };
@@ -193,7 +196,7 @@ describe('files/extract PPTX', () => {
     
     // Generate 501 slide files with shared mock for speed
     const sharedSlideMock: JsZipMockFile = {
-      async: async () => '<a:t>Slide text</a:t>',
+      async: () => Promise.resolve('<a:t>Slide text</a:t>'),
     };
     for (let i = 1; i <= 501; i++) {
       mockZipWithManySlides.files[`ppt/slides/slide${i}.xml`] = sharedSlideMock;
@@ -236,13 +239,13 @@ describe('files/extract PPTX', () => {
     const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide10.xml': {
-          async: async () => '<a:t>Slide 10</a:t>',
+          async: () => Promise.resolve('<a:t>Slide 10</a:t>'),
         },
         'ppt/slides/slide2.xml': {
-          async: async () => '<a:t>Slide 2</a:t>',
+          async: () => Promise.resolve('<a:t>Slide 2</a:t>'),
         },
         'ppt/slides/slide1.xml': {
-          async: async () => '<a:t>Slide 1</a:t>',
+          async: () => Promise.resolve('<a:t>Slide 1</a:t>'),
         },
       },
     };
@@ -292,10 +295,10 @@ describe('files/extract PPTX', () => {
     const mockZip: JsZipMock = {
       files: {
         'ppt/slides/slide1.xml': {
-          async: async () => slideWithTitle,
+          async: () => Promise.resolve(slideWithTitle),
         },
         'ppt/slides/slide2.xml': {
-          async: async () => slideWithDifferentTitle,
+          async: () => Promise.resolve(slideWithDifferentTitle),
         },
       },
     };

@@ -1,9 +1,8 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { extractErrorMessage, findTextContent, requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // ---- Env must be set BEFORE importing the app ----
 process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
@@ -23,13 +22,15 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 // Mock PDF extraction so tests don't depend on real parsers
 vi.mock('pdf-parse', () => ({
-  default: async (_buf: Buffer) => ({
-    text: 'Slide 1: Intro\nAcoustics is the science of sound. This is a longer text to ensure it passes the image-only detection threshold.',
-  }),
+  default: (_buf: Buffer) =>
+    Promise.resolve({
+      text: 'Slide 1: Intro\nAcoustics is the science of sound. This is a longer text to ensure it passes the image-only detection threshold.',
+    }),
 }));
 
 // If your implementation uses mammoth/jszip for DOCX/PPTX, you can add mocks here as needed.

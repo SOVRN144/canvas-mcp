@@ -1,8 +1,9 @@
+import type { Express } from 'express';
+/* eslint-disable security/detect-object-injection */
 import supertest from 'supertest';
+import type { SuperTest, Test } from 'supertest';
 import { vi } from 'vitest';
 
-import type { Express } from 'express';
-import type { SuperTest, Test } from 'supertest';
 
 type LoadedApp = {
   app: Express;

@@ -3,12 +3,11 @@ process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
 process.env.CANVAS_TOKEN = 'x';
 process.env.DISABLE_HTTP_LISTEN = '1';
 
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { extractErrorMessage, findTextContent, requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Mock axios
 const get = vi.fn<(url: string) => Promise<unknown>>();
@@ -22,6 +21,7 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 let app: Express;

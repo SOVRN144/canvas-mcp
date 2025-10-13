@@ -1,9 +1,8 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
 import { requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Mock axios before importing app
 const get = vi.fn<(url: string, config?: unknown) => Promise<unknown>>();
@@ -20,11 +19,12 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 // Mock pdf-parse to avoid "missing callable export" error
 vi.mock('pdf-parse', () => ({ 
-  default: async (_buf: Buffer) => ({ text: '' })  // Empty text to trigger OCR
+  default: (_buf: Buffer) => Promise.resolve({ text: '' })  // Empty text to trigger OCR
 }));
 
 let app: Express;

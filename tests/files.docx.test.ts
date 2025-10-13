@@ -1,8 +1,6 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
-import type { Express } from 'express';
-
 import { findTextContent, requireSessionId } from './helpers.js';
 
 // Set env before importing
@@ -22,14 +20,16 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 // Mock mammoth for DOCX extraction
 vi.mock('mammoth', () => ({
   default: {
-    extractRawText: async (_: unknown) => ({
-      value: 'Document title\n\nThis is extracted DOCX content with multiple paragraphs.\n\nSecond paragraph here.'
-    })
+    extractRawText: (_: unknown) =>
+      Promise.resolve({
+        value: 'Document title\n\nThis is extracted DOCX content with multiple paragraphs.\n\nSecond paragraph here.'
+      })
   }
 }));
 

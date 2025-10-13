@@ -1,9 +1,8 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
 import { requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Mock axios before importing app
 const get = vi.fn<(url: string, config?: unknown) => Promise<unknown>>();
@@ -20,6 +19,7 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 let app: Express;

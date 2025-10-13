@@ -1,9 +1,8 @@
+import type { Express } from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { findTextContent, requireSessionId } from './helpers.js';
 
-import type { Express } from 'express';
 
 // Set env before importing
 process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
@@ -22,6 +21,7 @@ vi.mock('axios', () => ({
     AxiosHeaders,
   },
   AxiosHeaders,
+  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
 }));
 
 let app: Express;
