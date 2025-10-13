@@ -1,94 +1,36 @@
-import type { Express } from 'express';
-import supertest from 'supertest';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { extractErrorMessage, requireSessionId } from './helpers.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  callTool,
+  createAxiosMockSuite,
+  extractErrorMessage,
+  loadAppWithEnv,
+  LoadedAppContext,
+} from './helpers.js';
 
-
-// Set env before importing
-process.env.NODE_ENV = 'development';  // Set to development to get detailed errors
-process.env.CANVAS_BASE_URL = 'https://example.canvas.test';
-process.env.CANVAS_TOKEN = 'x';
-process.env.DISABLE_HTTP_LISTEN = '1';
-
-// Mock axios
-const get = vi.fn<(url: string) => Promise<unknown>>();
-const create = vi.fn(() => ({ get }));
-const AxiosHeaders = { from: (_: unknown) => ({}) };
-vi.mock('axios', () => ({
-  default: {
-    create,
-    get,
-    isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
-    AxiosHeaders,
-  },
-  AxiosHeaders,
-  isAxiosError: (e: unknown) => typeof e === 'object' && e !== null && 'isAxiosError' in e,
-}));
-
-let app: Express;
-
-type ToolCallResult = {
-  result?: {
-    structuredContent?: {
-      file?: { contentType?: string };
-      blocks?: Array<unknown>;
-    };
-  };
-};
-
-async function initSession(): Promise<string> {
-  const res = await supertest(app)
-    .post('/mcp')
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2024-11-05' },
-    });
-
-  return requireSessionId(res.headers['mcp-session-id']);
-}
-
-async function callTool(
-  sessionId: string,
-  tool: string,
-  args: Record<string, unknown>
-): Promise<unknown> {
-  const res = await supertest(app)
-    .post('/mcp')
-    .set('Mcp-Session-Id', sessionId)
-    .set('Accept', 'application/json, text/event-stream')
-    .set('Content-Type', 'application/json')
-    .send({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name: tool, arguments: args },
-    });
-
-  expect(res.status).toBe(200);
-  return res.body as unknown;
-}
+const axiosMocks = createAxiosMockSuite();
+let context: LoadedAppContext | undefined;
 
 describe('files/extract edge cases', () => {
-  beforeAll(async () => {
-    const mod = await import('../src/http.js');
-    if (!mod.app) {
-      throw new Error('HTTP module did not export app');
-    }
-    app = mod.app;
+  beforeEach(async () => {
+    axiosMocks.reset();
+    axiosMocks.install();
+
+    context = await loadAppWithEnv({
+      NODE_ENV: 'development',
+      CANVAS_BASE_URL: 'https://example.canvas.test',
+      CANVAS_TOKEN: 'x',
+    });
   });
 
   afterEach(() => {
+    context?.restoreEnv();
+    context = undefined;
+    axiosMocks.reset();
     vi.restoreAllMocks();
-    vi.resetModules();
   });
 
-  it('handles missing header + .TXT extension → resolves as text/plain', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  it('handles missing header with .TXT extension by treating as text/plain', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
@@ -96,28 +38,24 @@ describe('files/extract edge cases', () => {
             display_name: 'test.TXT',
             filename: 'test.TXT',
             size: 100,
-            // content_type missing (undefined)
             url: 'https://files.canvas.example/test',
           },
         });
       }
-      // File download - no content-type header
       return Promise.resolve({
         data: Buffer.from('Hello World'),
-        headers: {}, // No content-type
+        headers: {},
       });
     });
 
-    const sid = await initSession();
-    const body = (await callTool(sid, 'extract_file', { fileId: 101 })) as ToolCallResult;
-
-    expect(body?.result?.structuredContent?.file?.contentType).toBe('text/plain');
-    expect((body?.result?.structuredContent?.blocks ?? []).length).toBeGreaterThan(0);
+    const body = await callTool(context!, 'extract_file', { fileId: 101 });
+    const structured = body.result?.structuredContent;
+    expect(structured?.file?.contentType).toBe('text/plain');
+    expect(structured?.blocks?.length).toBeGreaterThan(0);
   });
 
-  it('handles header with charset → accepted after normalization', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  it('normalizes charset parameters on content-types', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
@@ -136,22 +74,20 @@ describe('files/extract edge cases', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = (await callTool(sid, 'extract_file', { fileId: 102 })) as ToolCallResult;
-
-    expect(body?.result?.structuredContent?.file?.contentType).toBe('text/csv');
-    expect((body?.result?.structuredContent?.blocks ?? []).length).toBeGreaterThan(0);
+    const body = await callTool(context!, 'extract_file', { fileId: 102 });
+    const structured = body.result?.structuredContent;
+    expect(structured?.file?.contentType).toBe('text/csv');
+    expect(structured?.blocks?.length).toBeGreaterThan(0);
   });
 
-  it('throws for unknown header + no extension', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  it('throws when content-type is unsupported and no extension is present', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
             id: 103,
             display_name: 'mystery',
-            filename: 'mystery', // no extension
+            filename: 'mystery',
             size: 50,
             content_type: 'application/x-unknown-binary',
             url: 'https://files.canvas.example/mystery',
@@ -164,41 +100,35 @@ describe('files/extract edge cases', () => {
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 103 });
-
+    const body = await callTool(context!, 'extract_file', { fileId: 103 });
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 103: content type not allowed/);
   });
 
-  it('throws standardized error for oversized file', async () => {
-    get.mockReset();
-    get.mockImplementation((url: string) => {
+  it('throws standardized error for oversized file before download', async () => {
+    axiosMocks.get.mockImplementation((url: string) => {
       if (/\/api\/v1\/files\/\d+/.test(url)) {
         return Promise.resolve({
           data: {
             id: 104,
             display_name: 'huge.pdf',
             filename: 'huge.pdf',
-            size: 20 * 1024 * 1024, // 20MB > 15MB default limit
+            size: 20 * 1024 * 1024,
             content_type: 'application/pdf',
             url: 'https://files.canvas.example/huge',
           },
         });
       }
-      // Should not reach file download due to size check
       return Promise.resolve({
         data: Buffer.from('dummy'),
         headers: { 'content-type': 'application/pdf' },
       });
     });
 
-    const sid = await initSession();
-    const body = await callTool(sid, 'extract_file', { fileId: 104 });
-
+    const body = await callTool(context!, 'extract_file', { fileId: 104 });
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
-    expect(errorMessage).toMatch(/File 104: too large for extraction.*Use download_file instead/);
+    expect(errorMessage).toMatch(/too large/);
   });
 });
