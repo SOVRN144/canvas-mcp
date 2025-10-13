@@ -1,34 +1,32 @@
-/* eslint-disable security/detect-object-injection */
 import axios, { AxiosHeaders } from 'axios';
 import type { AxiosInstance, CreateAxiosDefaults } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config, getSanitizedCanvasToken } from '../src/config.js';
+import { getCanvasClient } from '../src/http.js';
 
+const ORIGINAL_TOKEN = config.canvasToken;
+const ORIGINAL_BASE_URL = config.canvasBaseUrl;
 
-const ORIGINAL_ENV = { ...process.env };
+type AxiosFn = (url: string, config?: unknown) => Promise<unknown>;
 
-const loadServer = async () => {
-  await import('../src/http.js');
-};
+const noopAxiosFn: AxiosFn = () => Promise.resolve({});
 
-const getAuthorizationHeader = (headers: unknown): string | undefined => {
-  if (!headers) return undefined;
-
-  const keys = ['Authorization', 'authorization', 'AUTHORIZATION'] as const;
-  const findString = (value: unknown): string | undefined => {
+const extractAuthorization = (headers: unknown): string | undefined => {
+  const keys = ['authorization', 'Authorization', 'AUTHORIZATION'];
+  const pickString = (value: unknown): string | undefined => {
     if (typeof value === 'string') {
       return value;
     }
     if (Array.isArray(value)) {
-      const firstString = value.find((entry: unknown): entry is string => typeof entry === 'string');
-      return firstString;
+      return value.find((entry): entry is string => typeof entry === 'string');
     }
     return undefined;
   };
 
   if (headers instanceof AxiosHeaders) {
     for (const key of keys) {
-      const value = headers.get?.(key);
-      const resolved = findString(value);
+      const val = headers.get?.(key as never);
+      const resolved = pickString(val);
       if (resolved) {
         return resolved;
       }
@@ -36,61 +34,61 @@ const getAuthorizationHeader = (headers: unknown): string | undefined => {
     return undefined;
   }
 
-  if (typeof headers === 'object') {
+  if (headers && typeof headers === 'object') {
     const dict = headers as Record<string, unknown>;
-    for (const key of keys) {
-      const resolved = findString(dict[key]);
-      if (resolved) {
-        return resolved;
-      }
+    if (Object.prototype.hasOwnProperty.call(dict, 'authorization')) {
+      const resolved = pickString(dict.authorization);
+      if (resolved) return resolved;
+    }
+    if (Object.prototype.hasOwnProperty.call(dict, 'Authorization')) {
+      const resolved = pickString(dict.Authorization);
+      if (resolved) return resolved;
+    }
+    if (Object.prototype.hasOwnProperty.call(dict, 'AUTHORIZATION')) {
+      const resolved = pickString(dict.AUTHORIZATION);
+      if (resolved) return resolved;
     }
   }
   return undefined;
 };
 
 describe('Canvas token sanitization', () => {
+  let capturedConfig: CreateAxiosDefaults | undefined;
+
   beforeEach(() => {
-    vi.resetModules();
-    vi.restoreAllMocks();
-    for (const key of Object.keys(process.env)) {
-      delete process.env[key];
-    }
-    Object.assign(process.env, ORIGINAL_ENV);
+    capturedConfig = undefined;
     process.env.CANVAS_BASE_URL = 'https://example.instructure.com';
     process.env.CANVAS_TOKEN = '  abc123\n';
+    config.canvasBaseUrl = 'https://example.instructure.com';
+    config.canvasToken = '  abc123\n';
+
+    vi.spyOn(axios, 'create').mockImplementation((defaults?: CreateAxiosDefaults) => {
+      capturedConfig = defaults;
+      return {
+        defaults: { headers: defaults?.headers },
+        get: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        post: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        put: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+        delete: vi.fn<AxiosFn>().mockImplementation(noopAxiosFn),
+      } as unknown as AxiosInstance;
+    });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.resetModules();
-    for (const key of Object.keys(process.env)) {
-      if (!(key in ORIGINAL_ENV)) {
-        delete process.env[key];
-      }
-    }
-    Object.assign(process.env, ORIGINAL_ENV);
+    config.canvasBaseUrl = ORIGINAL_BASE_URL;
+    config.canvasToken = ORIGINAL_TOKEN;
+    delete process.env.CANVAS_BASE_URL;
+    delete process.env.CANVAS_TOKEN;
   });
 
-  it('uses trimmed CANVAS_TOKEN when building Authorization headers', async () => {
-    let capturedConfig: CreateAxiosDefaults | undefined;
-    vi.spyOn(axios, 'create').mockImplementation((config?: CreateAxiosDefaults): AxiosInstance => {
-      capturedConfig = config;
-      return {
-        defaults: { headers: config?.headers },
-        get: vi.fn(),
-        post: vi.fn(),
-        put: vi.fn(),
-        delete: vi.fn(),
-      } as unknown as AxiosInstance;
-    });
+  it('trims Canvas token before creating the client', () => {
+    expect(getSanitizedCanvasToken()).toBe('abc123');
 
-    await loadServer();
-
+    const client = getCanvasClient();
+    expect(client).toBeTruthy();
     expect(capturedConfig).toBeTruthy();
-    if (!capturedConfig) {
-      throw new Error('axios.create was not invoked');
-    }
-    const authHeader = getAuthorizationHeader(capturedConfig.headers);
-    expect(authHeader).toBe('Bearer abc123');
+    const auth = extractAuthorization(capturedConfig?.headers);
+    expect(auth).toBe('Bearer abc123');
   });
 });
