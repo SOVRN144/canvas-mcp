@@ -31,7 +31,8 @@
     "mammoth": "^1.11.0",
     "pdf-parse": "^2.2.2",
     "sanitize-html": "^2.17.0",
-    "zod": "^4.1.12"
+    "zod": "^4.1.12",
+    "zod-v3": "npm:zod@^3.23.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -42,12 +43,12 @@
     "@types/supertest": "^2.0.16",
     "@typescript-eslint/eslint-plugin": "7.18.0",
     "@typescript-eslint/parser": "7.18.0",
+    "@vitest/coverage-v8": "^2.1.8",
     "eslint": "^8.57.1",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-security": "1.7.1",
     "eslint-plugin-vitest": "^0.5.4",
-    "@vitest/coverage-v8": "^2.1.8",
     "nock": "^14.0.10",
     "prettier": "^3.6.2",
     "supertest": "^7.1.3",

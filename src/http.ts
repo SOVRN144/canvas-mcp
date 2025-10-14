@@ -10,7 +10,8 @@ import cors from 'cors';
 import express from 'express';
 import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
-import { z, type ZodRawShape } from 'zod';
+import { z as z4 } from 'zod';
+import { z as z3 } from 'zod-v3';
 import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
@@ -58,27 +59,37 @@ const DEBUG_TOKEN = config.debugToken ?? '';
 // Derive version from runtime package metadata to avoid drift with package.json
 const SERVER_VERSION = process.env.npm_package_version ?? '0.0.0';
 
+const v3obj = <T extends z3.ZodRawShape>(shape: T) => z3.object(shape).strict();
 
-const createSchema = <Fields extends ZodRawShape>(
-  fields: Fields,
+const makeSchemas = <
+  ShapeV4 extends Record<string, z4.ZodTypeAny>,
+  ShapeV3 extends Record<string, z3.ZodTypeAny>
+>(
+  shapes: { v4: ShapeV4; v3: ShapeV3 },
   options?: { strict?: boolean }
 ) => {
-  const schema = options?.strict ? z.object(fields).strict() : z.object(fields);
+  const v4Schema = options?.strict ? z4.object(shapes.v4).strict() : z4.object(shapes.v4);
+  const v3Schema = options?.strict ? v3obj(shapes.v3) : z3.object(shapes.v3);
   return {
-    schema,
-    shape: fields,
+    v4: v4Schema,
+    v3: v3Schema,
   } as const;
 };
 
-const EchoSchemas = createSchema({
-  text: z.string().describe('text to echo'),
+const EchoSchemas = makeSchemas({
+  v4: {
+    text: z4.string().describe('text to echo'),
+  },
+  v3: {
+    text: z3.string().describe('text to echo'),
+  },
 });
-const EchoInput = EchoSchemas.schema;
-const EchoInputShape = EchoSchemas.shape;
+const EchoInput = EchoSchemas.v4;
+const EchoInputShape = EchoSchemas.v3;
 
-const EnvCheckSchemas = createSchema({}, { strict: true });
-const EnvCheckInput = EnvCheckSchemas.schema;
-const EnvCheckInputShape = EnvCheckSchemas.shape;
+const EnvCheckSchemas = makeSchemas({ v4: {}, v3: {} }, { strict: true });
+const EnvCheckInput = EnvCheckSchemas.v4;
+const EnvCheckInputShape = EnvCheckSchemas.v3;
 
 const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
@@ -366,54 +377,84 @@ const fetchModules = async (courseId: number, includeItems: boolean): Promise<Ca
   return withItems;
 };
 
-const ListCoursesSchemas = createSchema({}, { strict: true });
-const ListCoursesInput = ListCoursesSchemas.schema;
-const ListCoursesInputShape = ListCoursesSchemas.shape;
+const ListCoursesSchemas = makeSchemas({ v4: {}, v3: {} }, { strict: true });
+const ListCoursesInput = ListCoursesSchemas.v4;
+const ListCoursesInputShape = ListCoursesSchemas.v3;
 
-const ListModulesSchemas = createSchema({
-  courseId: z.coerce.number().int(),
-  includeItems: z.boolean().optional(),
+const ListModulesSchemas = makeSchemas({
+  v4: {
+    courseId: z4.coerce.number().int(),
+    includeItems: z4.boolean().optional(),
+  },
+  v3: {
+    courseId: z3.coerce.number().int(),
+    includeItems: z3.boolean().optional(),
+  },
 });
-const ListModulesInput = ListModulesSchemas.schema;
-const ListModulesInputShape = ListModulesSchemas.shape;
+const ListModulesInput = ListModulesSchemas.v4;
+const ListModulesInputShape = ListModulesSchemas.v3;
 
-const ListFilesSchemas = createSchema({
-  courseId: z.coerce.number().int(),
+const ListFilesSchemas = makeSchemas({
+  v4: {
+    courseId: z4.coerce.number().int(),
+  },
+  v3: {
+    courseId: z3.coerce.number().int(),
+  },
 });
-const ListFilesInput = ListFilesSchemas.schema;
-const ListFilesInputShape = ListFilesSchemas.shape;
+const ListFilesInput = ListFilesSchemas.v4;
+const ListFilesInputShape = ListFilesSchemas.v3;
 
-const GetAssignmentSchemas = createSchema({
-  assignmentId: z.coerce.number().int().describe('Canvas assignment id'),
-  courseId: z.coerce.number().int().describe('Canvas course id (preferred if known)'),
-  mode: z.enum(['html', 'text']).optional().default('text'),
-  maxChars: z.number().int().positive().max(100_000).optional(),
+const GetAssignmentSchemas = makeSchemas({
+  v4: {
+    assignmentId: z4.coerce.number().int().describe('Canvas assignment id'),
+    courseId: z4.coerce.number().int().describe('Canvas course id (preferred if known)'),
+    mode: z4.enum(['html', 'text']).optional().default('text'),
+    maxChars: z4.number().int().positive().max(100_000).optional(),
+  },
+  v3: {
+    assignmentId: z3.coerce.number().int().describe('Canvas assignment id'),
+    courseId: z3.coerce.number().int().describe('Canvas course id (preferred if known)'),
+    mode: z3.enum(['html', 'text']).optional().default('text'),
+    maxChars: z3.number().int().positive().max(100_000).optional(),
+  },
 }, { strict: true });
-const GetAssignmentInput = GetAssignmentSchemas.schema;
-const GetAssignmentInputShape = GetAssignmentSchemas.shape;
+const GetAssignmentInput = GetAssignmentSchemas.v4;
+const GetAssignmentInputShape = GetAssignmentSchemas.v3;
 
-const ExtractFileSchemas = createSchema({
-  fileId: z.coerce.number().int(),
-  mode: z.enum(['text', 'outline', 'slides']).optional(),
-  maxChars: z.number().int().positive().max(100_000).optional(),
-  ocr: z.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
-  ocrLanguages: z.array(z.string()).optional().default(['eng']),
-  maxOcrPages: z.number().int().min(1).max(200).optional().default(20),
+const ExtractFileSchemas = makeSchemas({
+  v4: {
+    fileId: z4.coerce.number().int(),
+    mode: z4.enum(['text', 'outline', 'slides']).optional(),
+    maxChars: z4.number().int().positive().max(100_000).optional(),
+    ocr: z4.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
+    ocrLanguages: z4.array(z4.string()).optional().default(['eng']),
+    maxOcrPages: z4.number().int().min(1).max(200).optional().default(20),
+  },
+  v3: {
+    fileId: z3.coerce.number().int(),
+    mode: z3.enum(['text', 'outline', 'slides']).optional(),
+    maxChars: z3.number().int().positive().max(100_000).optional(),
+    ocr: z3.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
+    ocrLanguages: z3.array(z3.string()).optional().default(['eng']),
+    maxOcrPages: z3.number().int().min(1).max(200).optional().default(20),
+  },
 });
-const ExtractFileInput = ExtractFileSchemas.schema;
-const ExtractFileInputShape = ExtractFileSchemas.shape;
+const ExtractFileInput = ExtractFileSchemas.v4;
+const ExtractFileInputShape = ExtractFileSchemas.v3;
 
-const DownloadFileSchemas = createSchema({
-  fileId: z.coerce.number().int(),
-  maxSize: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(MAX_FILE_SIZE)
-    .optional(),
+const DownloadFileSchemas = makeSchemas({
+  v4: {
+    fileId: z4.coerce.number().int(),
+    maxSize: z4.coerce.number().int().positive().max(MAX_FILE_SIZE).optional(),
+  },
+  v3: {
+    fileId: z3.coerce.number().int(),
+    maxSize: z3.coerce.number().int().positive().max(MAX_FILE_SIZE).optional(),
+  },
 }, { strict: true });
-const DownloadFileInput = DownloadFileSchemas.schema;
-const DownloadFileInputShape = DownloadFileSchemas.shape;
+const DownloadFileInput = DownloadFileSchemas.v4;
+const DownloadFileInputShape = DownloadFileSchemas.v3;
 
 const createServer = () => {
   const server = new McpServer({ name: 'sanity-mcp', version: SERVER_VERSION });
