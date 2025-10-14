@@ -53,6 +53,7 @@ describe('files/extract disallowed types', () => {
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 999: content type not allowed/);
+    expect(axiosMocks.get).toHaveBeenCalledTimes(1);
   });
 
   it('rejects video files with standardized error', async () => {
@@ -79,6 +80,7 @@ describe('files/extract disallowed types', () => {
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 888: content type not allowed/);
+    expect(axiosMocks.get).toHaveBeenCalledTimes(1);
   });
 
   it('rejects image files with standardized error', async () => {
@@ -105,5 +107,6 @@ describe('files/extract disallowed types', () => {
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/File 777: content type not allowed/);
+    expect(axiosMocks.get).toHaveBeenCalledTimes(1);
   });
 });

@@ -221,7 +221,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       .filter(n => n.startsWith('ppt/slides/slide') && n.endsWith('.xml'))
       .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
-    if (slideFiles.length > MAX_PPTX_SLIDES) {
+    if (slideFiles.length >= MAX_PPTX_SLIDES) {
       throw new Error(errPptxTooManySlides(fileId, slideFiles.length, MAX_PPTX_SLIDES));
     }
     
@@ -310,6 +310,21 @@ export async function extractFileContent(
 ): Promise<ExtractResult> {
   // Get file metadata
   const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+
+  const metadataContentType = normalizeMime(fileMeta.content_type);
+  const metadataExtensionType = getMimeTypeFromExtension(fileMeta.display_name || fileMeta.filename || '');
+  const initialContentType =
+    metadataContentType && metadataContentType !== 'application/octet-stream'
+      ? metadataContentType
+      : normalizeMime(metadataExtensionType);
+
+  if (!initialContentType) {
+    fail(fileMeta.id, 'unable to determine content type');
+  }
+
+  if (!ALLOWED_MIME_TYPES.has(initialContentType)) {
+    fail(fileMeta.id, `content type not allowed (${initialContentType || 'unknown'})`);
+  }
   
   // Check size limit for extraction
   const maxBytes = MAX_EXTRACT_MB * 1024 * 1024;
@@ -338,7 +353,7 @@ export async function extractFileContent(
   // 1. HTTP header (if specific and not generic)
   // 2. File extension fallback (if header is missing/generic)
   // 3. Error if neither yields a recognized type
-  const finalContentType = normalizedResponseType || normalizedExtensionType;
+  const finalContentType = normalizedResponseType || normalizedExtensionType || initialContentType;
   
   if (!finalContentType) {
     fail(fileMeta.id, 'unable to determine content type');

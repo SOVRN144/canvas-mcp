@@ -43,6 +43,8 @@ module.exports = {
         alphabetize: { order: 'asc', caseInsensitive: true },
       },
     ],
+    'import/no-unresolved': ['error', { ignore: ['^node:', '^@modelcontextprotocol/sdk/'] }],
+    'import/no-named-as-default': 'off',
     'import/no-unresolved': 'off',
     'no-restricted-syntax': [
       'error',
@@ -55,9 +57,23 @@ module.exports = {
   settings: {
     'import/resolver': {
       node: true,
+      typescript: { project: ['tsconfig.json', 'tsconfig.eslint.json'] },
     },
   },
   overrides: [
+    {
+      files: ['**/*.ts'],
+      excludedFiles: ['src/http.ts'],
+      rules: {
+        'no-restricted-imports': ['error', { paths: [{ name: 'zod-v3', message: 'Use Zod v4. zod-v3 allowed only in src/http.ts' }] }],
+      },
+    },
+    {
+      files: ['src/http.ts'],
+      rules: {
+        'no-restricted-imports': 'off',
+      },
+    },
     {
       files: ['tests/**/*.ts'],
       env: {
