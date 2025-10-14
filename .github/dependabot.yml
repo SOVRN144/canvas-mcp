@@ -34,3 +34,12 @@ updates:
       - dependency-name: "@typescript-eslint/*"
         versions:
           - "8.x"
+      - dependency-name: "@vitest/coverage-v8"
+        versions:
+          - "3.x"
+      - dependency-name: "@types/node"
+        versions:
+          - "21.x"
+          - "22.x"
+          - "23.x"
+          - "24.x"
