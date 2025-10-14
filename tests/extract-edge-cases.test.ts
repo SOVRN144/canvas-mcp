@@ -130,5 +130,6 @@ describe('files/extract edge cases', () => {
     const errorMessage = extractErrorMessage(body);
     expect(errorMessage).toBeTruthy();
     expect(errorMessage).toMatch(/too large/);
+    expect(axiosMocks.get).toHaveBeenCalledTimes(1);
   });
 });
