@@ -22,7 +22,8 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci || npm install
+      # Deterministic install for Scorecard; lockfile pins dependencies
+      - run: npm ci
       - run: npm run typecheck
       - name: Lint
         run: npm run lint -- -f codeframe
@@ -42,8 +43,9 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+      # Deterministic install for Scorecard; lockfile pins dependencies
       - name: Install dependencies
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -180,9 +182,10 @@ jobs:
             echo "has_canvas=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Deterministic install for Scorecard; lockfile pins dependencies
       - name: Install dependencies
         if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Typecheck
         if: ${{ steps.canvas_guard.outputs.has_canvas == 'true' }}
@@ -286,7 +289,8 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci || npm install
+      # Deterministic install for Scorecard; lockfile pins dependencies
+      - run: npm ci
       - name: Public smoke
         env:
           PUBLIC_BASE: ${{ github.event.inputs.PUBLIC_URL }}
