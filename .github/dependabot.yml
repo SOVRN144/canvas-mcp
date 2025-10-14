@@ -17,3 +17,10 @@ updates:
           - "prettier"
           - "typescript"
           - "vitest"
+    ignore:
+      - dependency-name: "eslint"
+        versions:
+          - "9.x"
+      - dependency-name: "vitest"
+        versions:
+          - "3.x"

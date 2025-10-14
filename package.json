@@ -20,7 +20,7 @@
     "pretest:smoke": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.19.1",
+    "@modelcontextprotocol/sdk": "1.20.0",
     "axios": "^1.12.2",
     "cors": "2.8.5",
     "dotenv": "16.4.5",
@@ -31,7 +31,8 @@
     "mammoth": "^1.11.0",
     "pdf-parse": "^2.2.2",
     "sanitize-html": "^2.17.0",
-    "zod": "3.25.8"
+    "zod": "^4.1.12",
+    "zod-v3": "npm:zod@3.23.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -42,7 +43,7 @@
     "@types/supertest": "^2.0.16",
     "@typescript-eslint/eslint-plugin": "7.18.0",
     "@typescript-eslint/parser": "7.18.0",
-    "eslint": "8.57.0",
+    "eslint": "^8.57.1",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-security": "1.7.1",
