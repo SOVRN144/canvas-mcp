@@ -30,7 +30,7 @@
     "he": "^1.2.0",
     "jszip": "^3.10.1",
     "mammoth": "^1.11.0",
-    "pdf-parse": "^2.3.6",
+    "pdf-parse": "^2.3.7",
     "sanitize-html": "^2.17.0",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.0"
