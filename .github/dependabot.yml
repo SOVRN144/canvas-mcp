@@ -43,3 +43,6 @@ updates:
           - "22.x"
           - "23.x"
           - "24.x"
+      - dependency-name: "eslint-plugin-security"
+        versions:
+          - "3.x"   # flat-config only, requires ESLint 9
