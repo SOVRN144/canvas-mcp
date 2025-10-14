@@ -10,8 +10,7 @@ import cors from 'cors';
 import express from 'express';
 import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
-import { z } from 'zod';
-import { z as zClassic } from 'zod-v3';
+import { z, type ZodRawShape } from 'zod';
 import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
@@ -59,31 +58,27 @@ const DEBUG_TOKEN = config.debugToken ?? '';
 // Derive version from runtime package metadata to avoid drift with package.json
 const SERVER_VERSION = process.env.npm_package_version ?? '0.0.0';
 
-type SchemaPair<M extends z.ZodTypeAny, C extends zClassic.ZodTypeAny> = {
-  modern: M;
-  classic: C;
+
+const createSchema = <Fields extends ZodRawShape>(
+  fields: Fields,
+  options?: { strict?: boolean }
+) => {
+  const schema = options?.strict ? z.object(fields).strict() : z.object(fields);
+  return {
+    schema,
+    shape: fields,
+  } as const;
 };
 
-const schemaPair = <M extends z.ZodTypeAny, C extends zClassic.ZodTypeAny>(modern: M, classic: C): SchemaPair<M, C> => ({ modern, classic });
-
-const buildSchemas = <Fields extends Record<string, SchemaPair<z.ZodTypeAny, zClassic.ZodTypeAny>>>(fields: Fields) => ({
-  modern: Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.modern])) as {
-    [K in keyof Fields]: Fields[K]['modern'];
-  },
-  classic: Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.classic])) as {
-    [K in keyof Fields]: Fields[K]['classic'];
-  },
+const EchoSchemas = createSchema({
+  text: z.string().describe('text to echo'),
 });
+const EchoInput = EchoSchemas.schema;
+const EchoInputShape = EchoSchemas.shape;
 
-const EchoSchemas = buildSchemas({
-  text: schemaPair(z.string().describe('text to echo'), zClassic.string().describe('text to echo')),
-});
-const EchoInput = z.object(EchoSchemas.modern);
-const EchoInputShape = EchoSchemas.classic as zClassic.ZodRawShape;
-
-const EnvCheckSchemas = buildSchemas({});
-const EnvCheckInput = z.object(EnvCheckSchemas.modern).strict();
-const EnvCheckInputShape = EnvCheckSchemas.classic as zClassic.ZodRawShape;
+const EnvCheckSchemas = createSchema({}, { strict: true });
+const EnvCheckInput = EnvCheckSchemas.schema;
+const EnvCheckInputShape = EnvCheckSchemas.shape;
 
 const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
@@ -371,71 +366,54 @@ const fetchModules = async (courseId: number, includeItems: boolean): Promise<Ca
   return withItems;
 };
 
-const ListCoursesSchemas = buildSchemas({});
-const ListCoursesInput = z.object(ListCoursesSchemas.modern).strict();
-const ListCoursesInputShape = ListCoursesSchemas.classic;
+const ListCoursesSchemas = createSchema({}, { strict: true });
+const ListCoursesInput = ListCoursesSchemas.schema;
+const ListCoursesInputShape = ListCoursesSchemas.shape;
 
-const ListModulesSchemas = buildSchemas({
-  courseId: schemaPair(z.coerce.number().int(), zClassic.coerce.number().int()),
-  includeItems: schemaPair(z.boolean().optional(), zClassic.boolean().optional()),
+const ListModulesSchemas = createSchema({
+  courseId: z.coerce.number().int(),
+  includeItems: z.boolean().optional(),
 });
-const ListModulesInput = z.object(ListModulesSchemas.modern);
-const ListModulesInputShape = ListModulesSchemas.classic;
+const ListModulesInput = ListModulesSchemas.schema;
+const ListModulesInputShape = ListModulesSchemas.shape;
 
-const ListFilesSchemas = buildSchemas({
-  courseId: schemaPair(z.coerce.number().int(), zClassic.coerce.number().int()),
+const ListFilesSchemas = createSchema({
+  courseId: z.coerce.number().int(),
 });
-const ListFilesInput = z.object(ListFilesSchemas.modern);
-const ListFilesInputShape = ListFilesSchemas.classic;
+const ListFilesInput = ListFilesSchemas.schema;
+const ListFilesInputShape = ListFilesSchemas.shape;
 
-const GetAssignmentSchemas = buildSchemas({
-  assignmentId: schemaPair(
-    z.coerce.number().int().describe('Canvas assignment id'),
-    zClassic.coerce.number().int().describe('Canvas assignment id')
-  ),
-  courseId: schemaPair(
-    z.coerce.number().int().describe('Canvas course id (preferred if known)'),
-    zClassic.coerce.number().int().describe('Canvas course id (preferred if known)')
-  ),
-  mode: schemaPair(z.enum(['html', 'text']).optional().default('text'), zClassic.enum(['html', 'text']).optional().default('text')),
-  maxChars: schemaPair(z.number().int().positive().max(100_000).optional(), zClassic.number().int().positive().max(100_000).optional()),
-});
-const GetAssignmentInput = z.object(GetAssignmentSchemas.modern).strict();
-const GetAssignmentInputShape = GetAssignmentSchemas.classic;
+const GetAssignmentSchemas = createSchema({
+  assignmentId: z.coerce.number().int().describe('Canvas assignment id'),
+  courseId: z.coerce.number().int().describe('Canvas course id (preferred if known)'),
+  mode: z.enum(['html', 'text']).optional().default('text'),
+  maxChars: z.number().int().positive().max(100_000).optional(),
+}, { strict: true });
+const GetAssignmentInput = GetAssignmentSchemas.schema;
+const GetAssignmentInputShape = GetAssignmentSchemas.shape;
 
-const ExtractFileSchemas = buildSchemas({
-  fileId: schemaPair(z.coerce.number().int(), zClassic.coerce.number().int()),
-  mode: schemaPair(z.enum(['text', 'outline', 'slides']).optional(), zClassic.enum(['text', 'outline', 'slides']).optional()),
-  maxChars: schemaPair(z.number().int().positive().max(100_000).optional(), zClassic.number().int().positive().max(100_000).optional()),
-  ocr: schemaPair(
-    z.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
-    zClassic.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR')
-  ),
-  ocrLanguages: schemaPair(z.array(z.string()).optional().default(['eng']), zClassic.array(zClassic.string()).optional().default(['eng'])),
-  maxOcrPages: schemaPair(z.number().int().min(1).max(200).optional().default(20), zClassic.number().int().min(1).max(200).optional().default(20)),
+const ExtractFileSchemas = createSchema({
+  fileId: z.coerce.number().int(),
+  mode: z.enum(['text', 'outline', 'slides']).optional(),
+  maxChars: z.number().int().positive().max(100_000).optional(),
+  ocr: z.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
+  ocrLanguages: z.array(z.string()).optional().default(['eng']),
+  maxOcrPages: z.number().int().min(1).max(200).optional().default(20),
 });
-const ExtractFileInput = z.object(ExtractFileSchemas.modern);
-const ExtractFileInputShape = ExtractFileSchemas.classic;
+const ExtractFileInput = ExtractFileSchemas.schema;
+const ExtractFileInputShape = ExtractFileSchemas.shape;
 
-const DownloadFileSchemas = buildSchemas({
-  fileId: schemaPair(z.coerce.number().int(), zClassic.coerce.number().int()),
-  maxSize: schemaPair(
-    z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(MAX_FILE_SIZE)
-      .optional(),
-    zClassic.coerce
-      .number()
-      .int()
-      .positive()
-      .max(MAX_FILE_SIZE)
-      .optional()
-  ),
-});
-const DownloadFileInput = z.object(DownloadFileSchemas.modern).strict();
-const DownloadFileInputShape = DownloadFileSchemas.classic;
+const DownloadFileSchemas = createSchema({
+  fileId: z.coerce.number().int(),
+  maxSize: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_FILE_SIZE)
+    .optional(),
+}, { strict: true });
+const DownloadFileInput = DownloadFileSchemas.schema;
+const DownloadFileInputShape = DownloadFileSchemas.shape;
 
 const createServer = () => {
   const server = new McpServer({ name: 'sanity-mcp', version: SERVER_VERSION });
