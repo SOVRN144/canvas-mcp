@@ -221,7 +221,7 @@ async function extractPptxText(buffer: Buffer, fileId: number): Promise<FileCont
       .filter(n => n.startsWith('ppt/slides/slide') && n.endsWith('.xml'))
       .sort((a,b) => (Number(a.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)) - (Number(b.match(/slide(\d+)\.xml/)?.[1] ?? 1e9)));
     
-    if (slideFiles.length > MAX_PPTX_SLIDES) {
+    if (slideFiles.length >= MAX_PPTX_SLIDES) {
       throw new Error(errPptxTooManySlides(fileId, slideFiles.length, MAX_PPTX_SLIDES));
     }
     
