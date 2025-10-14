@@ -20,8 +20,8 @@ jobs:
           cache: 'npm'
       - run: npm ci || npm install
       - run: npm run typecheck
-      - name: Lint with full error output
-        run: npm run lint --silent || (echo '--- ESLint errors ---' && npm run lint --silent -- -f codeframe && exit 1)
+      - name: Lint
+        run: npm run lint -- -f codeframe
       - run: npm run build
       - name: Run tests with coverage
         run: npm test -- --coverage --reporter=dot

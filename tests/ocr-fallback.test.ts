@@ -112,5 +112,6 @@ describe('extract_file OCR', () => {
 
     const errMsg = extractErrorMessage(body) ?? '';
     expect(errMsg).toMatch(/ocr.*auto.*force|download_file/i);
+    expect(axiosMocks.post).not.toHaveBeenCalled();
   });
 });

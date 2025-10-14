@@ -1,7 +1,20 @@
-process.env.DISABLE_HTTP_LISTEN = '1';
-
 import supertest from 'supertest';
+import { afterAll, beforeAll } from 'vitest';
 import { app } from '../src/http.js';
+
+const previousDisable = process.env.DISABLE_HTTP_LISTEN;
+
+beforeAll(() => {
+  process.env.DISABLE_HTTP_LISTEN = '1';
+});
+
+afterAll(() => {
+  if (previousDisable === undefined) {
+    delete process.env.DISABLE_HTTP_LISTEN;
+  } else {
+    process.env.DISABLE_HTTP_LISTEN = previousDisable;
+  }
+});
 
 describe('pending session races', () => {
   it('does not delete a newer pending promise for the same key', async () => {

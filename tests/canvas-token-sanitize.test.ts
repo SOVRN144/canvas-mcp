@@ -25,7 +25,7 @@ const extractAuthorization = (headers: unknown): string | undefined => {
 
   if (headers instanceof AxiosHeaders) {
     for (const key of keys) {
-      const val = headers.get?.(key as never);
+      const val = headers.get ? headers.get(key) : undefined;
       const resolved = pickString(val);
       if (resolved) {
         return resolved;
@@ -36,17 +36,11 @@ const extractAuthorization = (headers: unknown): string | undefined => {
 
   if (headers && typeof headers === 'object') {
     const dict = headers as Record<string, unknown>;
-    if (Object.prototype.hasOwnProperty.call(dict, 'authorization')) {
-      const resolved = pickString(dict.authorization);
-      if (resolved) return resolved;
-    }
-    if (Object.prototype.hasOwnProperty.call(dict, 'Authorization')) {
-      const resolved = pickString(dict.Authorization);
-      if (resolved) return resolved;
-    }
-    if (Object.prototype.hasOwnProperty.call(dict, 'AUTHORIZATION')) {
-      const resolved = pickString(dict.AUTHORIZATION);
-      if (resolved) return resolved;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(dict, key)) {
+        const resolved = pickString(dict[key]);
+        if (resolved) return resolved;
+      }
     }
   }
   return undefined;

@@ -132,7 +132,7 @@ describe('files/extract PPTX', () => {
     const sharedSlide: JsZipMockFile = {
       async: () => Promise.resolve('<a:t>Slide text</a:t>'),
     };
-    for (let i = 0; i <= 500; i += 1) {
+    for (let i = 0; i < 500; i += 1) {
       mockZip.files[`ppt/slides/slide${i}.xml`] = sharedSlide;
     }
     jsZipLoadAsyncMock.mockResolvedValueOnce(mockZip);
