@@ -2,6 +2,33 @@
 
 Thank you for your interest in contributing to Canvas MCP!
 
+## Code Review Policy
+
+All changes to the `main` branch require review and approval:
+
+- **Required**: At least 1 approving review from a project maintainer
+- **Branch Protection**: GitHub branch protection rules enforce this requirement
+- **CI Validation**: All pull requests must pass CI checks before merging:
+  - Build (`npm run build`)
+  - Type checking (`npm run typecheck`)
+  - Linting (`npm run lint`)
+  - Tests (`npm run test:coverage`)
+  - Security audit (`npm run audit:ci`)
+
+### Security-Sensitive Changes
+
+For changes involving:
+- Authentication or authorization
+- Data validation or sanitization
+- File handling or uploads
+- API endpoint modifications
+- Workflow permissions or secrets
+
+Please:
+1. Tag `@SOVRN144` for review
+2. Reference any relevant security guidelines in SECURITY.md
+3. Ensure CodeQL analysis passes with no new alerts
+
 ## Development Setup
 
 ### Prerequisites
