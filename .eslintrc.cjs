@@ -44,6 +44,13 @@ module.exports = {
       },
     ],
     'import/no-unresolved': 'off',
+    'no-restricted-syntax': [
+      'error',
+      {
+        selector: "MemberExpression[property.name='_parse']",
+        message: 'Use zod.parse/safeParse, not internal _parse.',
+      },
+    ],
   },
   settings: {
     'import/resolver': {
