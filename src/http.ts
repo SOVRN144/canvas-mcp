@@ -11,6 +11,7 @@ import express from 'express';
 import type { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
 import { extractFileContent, downloadFileAsBase64 } from './files.js';
@@ -58,13 +59,24 @@ const DEBUG_TOKEN = config.debugToken ?? '';
 // Derive version from runtime package metadata to avoid drift with package.json
 const SERVER_VERSION = process.env.npm_package_version ?? '0.0.0';
 
-const EchoInputShape = {
-  text: z.string().describe('text to echo'),
-} as const;
-const EchoInput = z.object(EchoInputShape);
+type MakeSchemasOpts = { name: string; strict?: boolean };
 
-const EnvCheckInputShape = {} as const;
-const EnvCheckInput = z.object(EnvCheckInputShape);
+const makeSchemas = <S extends z.ZodRawShape>(fields: S, opts: MakeSchemasOpts) => {
+  const schema = opts.strict ? z.object(fields).strict() : z.object(fields);
+  const jsonSchema = zodToJsonSchema(schema, { name: opts.name });
+  return { schema, jsonSchema, shape: fields } as const;
+};
+
+const EchoSchemas = makeSchemas(
+  {
+    text: z.string().describe('text to echo'),
+  },
+  { name: 'EchoInput', strict: true }
+);
+const EchoInput = EchoSchemas.schema;
+
+const EnvCheckSchemas = makeSchemas({}, { name: 'EnvCheckInput', strict: true });
+const EnvCheckInput = EnvCheckSchemas.schema;
 
 const hasCanvas = Boolean((process.env.CANVAS_BASE_URL ?? '').trim() && getSanitizedCanvasToken());
 
@@ -352,48 +364,67 @@ const fetchModules = async (courseId: number, includeItems: boolean): Promise<Ca
   return withItems;
 };
 
-const ListCoursesInputShape = {} as const;
-const ListCoursesInput = z.object(ListCoursesInputShape);
+const ListCoursesSchemas = makeSchemas({}, { name: 'ListCoursesInput', strict: true });
+const ListCoursesInput = ListCoursesSchemas.schema;
 
-const ListModulesInputShape = {
-  courseId: z.number(),
-  includeItems: z.boolean().optional(),
-} as const;
-const ListModulesInput = z.object(ListModulesInputShape);
+const ListModulesSchemas = makeSchemas(
+  {
+    courseId: z.number(),
+    includeItems: z.boolean().optional(),
+  },
+  { name: 'ListModulesInput' }
+);
+const ListModulesInput = ListModulesSchemas.schema;
 
-const ListFilesInputShape = {
-  courseId: z.number(),
-} as const;
-const ListFilesInput = z.object(ListFilesInputShape);
+const ListFilesSchemas = makeSchemas(
+  {
+    courseId: z.number(),
+  },
+  { name: 'ListFilesInput' }
+);
+const ListFilesInput = ListFilesSchemas.schema;
 
-const GetAssignmentInputShape = {
-  assignmentId: z.number().describe('Canvas assignment id'),
-  courseId: z.number().describe('Canvas course id (preferred if known)'),
-  mode: z.enum(['html', 'text']).optional().default('text'),
-  maxChars: z.number().int().positive().max(100_000).optional(),
-} as const;
-const GetAssignmentInput = z.object(GetAssignmentInputShape).strict();
+const GetAssignmentSchemas = makeSchemas(
+  {
+    assignmentId: z.number().describe('Canvas assignment id'),
+    courseId: z.number().describe('Canvas course id (preferred if known)'),
+    mode: z.enum(['html', 'text']).optional().default('text'),
+    maxChars: z.number().int().positive().max(100_000).optional(),
+  },
+  { name: 'GetAssignmentInput', strict: true }
+);
+const GetAssignmentInput = GetAssignmentSchemas.schema;
 
-const ExtractFileInputShape = {
-  fileId: z.number(),
-  mode: z.enum(['text', 'outline', 'slides']).optional(),
-  maxChars: z.number().int().positive().max(100_000).optional(),
-  ocr: z.enum(['off', 'auto', 'force']).optional().default('auto').describe('Use OCR for image-only PDFs or force OCR'),
-  ocrLanguages: z.array(z.string()).optional().default(['eng']),
-  maxOcrPages: z.number().int().min(1).max(200).optional().default(20),
-} as const;
-const ExtractFileInput = z.object(ExtractFileInputShape);
+const ExtractFileSchemas = makeSchemas(
+  {
+    fileId: z.number(),
+    mode: z.enum(['text', 'outline', 'slides']).optional(),
+    maxChars: z.number().int().positive().max(100_000).optional(),
+    ocr: z
+      .enum(['off', 'auto', 'force'])
+      .optional()
+      .default('auto')
+      .describe('Use OCR for image-only PDFs or force OCR'),
+    ocrLanguages: z.array(z.string()).optional().default(['eng']),
+    maxOcrPages: z.number().int().min(1).max(200).optional().default(20),
+  },
+  { name: 'ExtractFileInput' }
+);
+const ExtractFileInput = ExtractFileSchemas.schema;
 
-const DownloadFileInputShape = {
-  fileId: z.number(),
-  maxSize: z
-    .coerce.number()
-    .int()
-    .positive()
-    .max(MAX_FILE_SIZE)
-    .optional(),
-} as const;
-const DownloadFileInput = z.object(DownloadFileInputShape).strict();
+const DownloadFileSchemas = makeSchemas(
+  {
+    fileId: z.number(),
+    maxSize: z
+      .coerce.number()
+      .int()
+      .positive()
+      .max(MAX_FILE_SIZE)
+      .optional(),
+  },
+  { name: 'DownloadFileInput', strict: true }
+);
+const DownloadFileInput = DownloadFileSchemas.schema;
 
 type RegisterToolArgs = Parameters<McpServer['registerTool']>;
 
@@ -412,10 +443,11 @@ const createServer = () => {
     {
       title: 'Echo',
       description: 'Returns the text you send',
-      inputSchema: EchoInputShape,
+      inputSchema: EchoSchemas.shape,
+      _meta: { inputJsonSchema: EchoSchemas.jsonSchema },
     },
     (args) => {
-      const { text } = EchoInput.parse(args);
+      const { text } = EchoInput.parse(args ?? {});
       return { content: [{ type: 'text', text }] };
     }
   );
@@ -425,7 +457,8 @@ const createServer = () => {
     {
       title: 'Env check',
       description: 'Reports if Canvas env vars are present (no secrets returned)',
-      inputSchema: EnvCheckInputShape,
+      inputSchema: EnvCheckSchemas.shape,
+      _meta: { inputJsonSchema: EnvCheckSchemas.jsonSchema },
     },
     (args) => {
       EnvCheckInput.parse(args ?? {});
@@ -450,7 +483,8 @@ const createServer = () => {
       {
         title: 'List courses',
         description: 'Lists active student enrollments',
-        inputSchema: ListCoursesInputShape,
+        inputSchema: ListCoursesSchemas.shape,
+        _meta: { inputJsonSchema: ListCoursesSchemas.jsonSchema },
       },
       async (args) => {
         ListCoursesInput.parse(args ?? {});
@@ -493,7 +527,8 @@ const createServer = () => {
       {
         title: 'List modules',
         description: 'Lists modules (optionally including items) for a course',
-        inputSchema: ListModulesInputShape,
+        inputSchema: ListModulesSchemas.shape,
+        _meta: { inputJsonSchema: ListModulesSchemas.jsonSchema },
       },
       async (args) => {
         const { courseId, includeItems = true } = ListModulesInput.parse(args ?? {});
@@ -513,7 +548,8 @@ const createServer = () => {
       {
         title: 'List files from modules',
         description: 'Lists files reachable via modules for a course',
-        inputSchema: ListFilesInputShape,
+        inputSchema: ListFilesSchemas.shape,
+        _meta: { inputJsonSchema: ListFilesSchemas.jsonSchema },
       },
       async (args) => {
         const { courseId } = ListFilesInput.parse(args ?? {});
@@ -568,7 +604,8 @@ const createServer = () => {
       {
         title: 'Get assignment details',
         description: 'Fetch Canvas assignment with sanitized HTML or plain text description',
-        inputSchema: GetAssignmentInputShape,
+        inputSchema: GetAssignmentSchemas.shape,
+        _meta: { inputJsonSchema: GetAssignmentSchemas.jsonSchema },
       },
       async (args) => {
         const { assignmentId, courseId, mode = 'text', maxChars } = GetAssignmentInput.parse(args ?? {});
@@ -652,7 +689,8 @@ const createServer = () => {
       {
         title: 'Extract text from Canvas file',
         description: 'Download and extract text from a Canvas file (PDF/DOCX/PPTX/TXT) with optional OCR',
-        inputSchema: ExtractFileInputShape,
+        inputSchema: ExtractFileSchemas.shape,
+        _meta: { inputJsonSchema: ExtractFileSchemas.jsonSchema },
       },
       async (args) => {
         const { 
@@ -784,7 +822,8 @@ const createServer = () => {
       {
         title: 'Download Canvas file as attachment',
         description: 'Download a Canvas file by id; small files inlined as base64, large files return URL',
-        inputSchema: DownloadFileInputShape,
+        inputSchema: DownloadFileSchemas.shape,
+        _meta: { inputJsonSchema: DownloadFileSchemas.jsonSchema },
       },
       async (args) => {
         const { fileId, maxSize = 8_000_000 } = DownloadFileInput.parse(args ?? {});
