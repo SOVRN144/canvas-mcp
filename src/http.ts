@@ -157,6 +157,8 @@ const parseCanvasErrors = (data: unknown): string | null => {
   return null;
 };
 
+// NOTE: Vitest forces NODE_ENV='test' via tests/setup.env.ts so validation
+// errors remain visible in tests; production still masks API/network errors.
 const raiseCanvasError = (error: unknown): never => {
   const timestamp = new Date().toISOString();
   const safeMessage = 'Canvas request failed; check server logs for details';
