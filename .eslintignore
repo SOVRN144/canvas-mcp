@@ -6,3 +6,6 @@ coverage
 .env.*
 src/smoke.local.ts
 services/ocr-webhook
+
+coverage/
+.nyc_output/
