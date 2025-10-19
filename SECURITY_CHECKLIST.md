@@ -95,7 +95,7 @@ This project uses:
 **File:** `LICENSE` (create at root)
 
 **Option A - MIT License (recommended for open source):**
-```
+```text
 MIT License
 
 Copyright (c) 2025 [Your Name/Organization]

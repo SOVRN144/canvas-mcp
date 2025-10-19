@@ -87,7 +87,10 @@ const ConfigSchema = z
     OCR_PROVIDER: z.enum(['none', 'webhook']).default('none'),
     OCR_WEBHOOK_URL: z.string().optional(),
     OCR_TIMEOUT_MS: z.string().optional(),
-    OCR_WEBHOOK_SECRET: z.string().optional(),
+    OCR_WEBHOOK_SECRET: z
+      .string()
+      .optional()
+      .transform((value) => (value ? value.trim() : undefined)),
     // Download settings
     DOWNLOAD_MAX_INLINE_BYTES: z.string().optional(),
     DOWNLOAD_URL_TTL_SEC: z.string().optional(),
@@ -122,7 +125,7 @@ export const config = {
   // OCR
   ocrProvider: env.OCR_PROVIDER,
   ocrWebhookUrl: env.OCR_WEBHOOK_URL || '',
-  ocrWebhookSecret: env.OCR_WEBHOOK_SECRET || '',
+  ocrWebhookSecret: env.OCR_WEBHOOK_SECRET ?? '',
   ocrTimeoutMs: num(env.OCR_TIMEOUT_MS, 20_000),
   // Downloads
   downloadMaxInlineBytes: num(env.DOWNLOAD_MAX_INLINE_BYTES, 10 * 1024 * 1024),

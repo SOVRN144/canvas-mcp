@@ -90,8 +90,11 @@ describe('OCR webhook signing', () => {
     expect(Array.isArray(configArg.transformRequest)).toBe(true);
     expect(configArg.transformRequest?.length).toBe(1);
     const transformer = configArg.transformRequest?.[0];
-    expect(typeof transformer).toBe('function');
-    expect(transformer?.('__test__')).toBe('__test__');
+    if (typeof transformer === 'function') {
+      expect(transformer('__test__')).toBe('__test__');
+    } else {
+      expect.fail('transformRequest[0] is not a function');
+    }
     expect(configArg?.maxBodyLength).toBe(Infinity);
     expect(configArg?.timeout).toBe(config.ocrTimeoutMs);
   });
@@ -115,8 +118,11 @@ describe('OCR webhook signing', () => {
     expect(Array.isArray(configArg.transformRequest)).toBe(true);
     expect(configArg.transformRequest?.length).toBe(1);
     const transformer = configArg.transformRequest?.[0];
-    expect(typeof transformer).toBe('function');
-    expect(transformer?.('payload')).toBe('payload');
+    if (typeof transformer === 'function') {
+      expect(transformer('payload')).toBe('payload');
+    } else {
+      expect.fail('transformRequest[0] is not a function');
+    }
     expect(configArg?.maxBodyLength).toBe(Infinity);
     expect(configArg?.timeout).toBe(config.ocrTimeoutMs);
   });

@@ -94,30 +94,43 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
       timeout: config.ocrTimeoutMs,
       headers,
       maxBodyLength: Infinity,
+      maxContentLength: Infinity,
       transformRequest: [(data: string) => data],
     });
 
-    const data = response.data as Partial<OcrResponse> | undefined;
-    if (!data || typeof data !== 'object') {
+    const raw = response.data as unknown;
+    if (!raw || typeof raw !== 'object') {
       throw new Error('Invalid OCR response payload');
     }
-    if (typeof data.text !== 'string') {
+    const responsePayload = raw as { text?: unknown; pagesOcred?: unknown; meta?: unknown };
+    const textValue: unknown = responsePayload.text;
+    if (typeof textValue !== 'string') {
       throw new Error('OCR response missing text');
     }
-    if (data.pagesOcred !== undefined && !Array.isArray(data.pagesOcred)) {
+    const pagesValue: unknown = responsePayload.pagesOcred;
+    if (pagesValue !== undefined && !Array.isArray(pagesValue)) {
       throw new Error('OCR response pagesOcred must be an array');
     }
-    const pagesOcred = Array.isArray(data.pagesOcred) ? data.pagesOcred : [];
+    const metaValue: unknown = responsePayload.meta;
+    if (metaValue !== undefined && (metaValue === null || typeof metaValue !== 'object')) {
+      throw new Error('OCR response meta must be an object');
+    }
+    const pagesOcred = Array.isArray(pagesValue)
+      ? pagesValue.filter((entry): entry is number => typeof entry === 'number')
+      : [];
+    const meta = metaValue && typeof metaValue === 'object' ? (metaValue as OcrResponse['meta']) : undefined;
+    const result: OcrResponse = {
+      text: textValue,
+      pagesOcred,
+      ...(meta ? { meta } : {}),
+    };
 
     logger.info('OCR request successful', {
-      pagesOcred: pagesOcred.length,
-      textLength: data.text.length,
+      pagesOcred: result.pagesOcred.length,
+      textLength: result.text.length,
     });
 
-    return {
-      ...data,
-      pagesOcred,
-    } as OcrResponse;
+    return result;
   } catch (error) {
     // Robust URL redaction (avoid throwing in error handler)
     const redactedUrl = (() => {
