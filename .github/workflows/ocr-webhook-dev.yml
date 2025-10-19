@@ -95,31 +95,50 @@ jobs:
           OCR_WEBHOOK_SECRET: ${{ secrets.OCR_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          # Determine if OpenAI is configured via /ready
+          
+          # Skip if OpenAI not configured
           OPENAI_READY=$(jq -r '.openai // false' ready.json)
           if [[ "$OPENAI_READY" != "true" ]]; then
-            echo "Skipping image smoke: openai=false" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "ℹ️  Skipping image smoke: /ready reports openai=false" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Known-good opaque 2x2 PNG (black). Avoids "unsupported image" from provider.
-          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR4nGP4z8AAAAMBAQAYl6a8AAAAAElFTkSuQmCC'
-
-          # Build payload and HMAC signature
-          PAYLOAD=$(jq -nc --arg m 'image/png' --arg d "$IMG_B64" '{mime:$m, dataBase64:$d}')
-          SIG=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -binary | xxd -p -c 256)
-          REQID="ci-image-smoke-$(date +%s)"
-
-          # Call /extract
-          curl -sS --fail-with-body --max-time 60 "http://127.0.0.1:${PORT}/extract" \
+          # Ensure tools present and generate a *real* opaque PNG (2×2 white)
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq imagemagick
+          
+          # Generate 2×2 opaque white PNG (no transparency)
+          convert -size 2x2 xc:white smoke.png
+          
+          # Verify it's PNG
+          echo "Generated image:" | tee -a "$GITHUB_STEP_SUMMARY"
+          file --mime-type smoke.png | tee -a "$GITHUB_STEP_SUMMARY"
+          file --mime-type smoke.png | grep -q 'image/png'
+          
+          # Base64 (no newlines, portable)
+          B64="$( base64 -w 0 smoke.png 2>/dev/null || base64 < smoke.png | tr -d '\n' )"
+          
+          # Construct JSON body with jq (raw & stable)
+          jq -nc --arg m "image/png" --arg d "$B64" '{mime:$m, dataBase64:$d}' > body.json
+          
+          # Compute HMAC over the *raw* body file (exact bytes we will send)
+          SIG="$(openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -binary < body.json | xxd -p -c 256)"
+          
+          # POST using --data-binary to avoid newline conversions; 60s timeout
+          curl -sS --fail --max-time 60 \
             -H 'content-type: application/json' \
-            -H "x-signature: sha256=$SIG" \
-            -H "x-request-id: $REQID" \
-            -d "$PAYLOAD" | tee image.json
-
-          # Assert response shape (do not require non-empty text; 2×2 PNG may yield empty)
+            -H "x-signature: sha256=${SIG}" \
+            --data-binary @body.json \
+            "http://127.0.0.1:${PORT}/extract" \
+            | tee image.json
+          
+          # Assert response shape without requiring non-empty text
           jq -e '.meta.engine=="openai-vision" and (.pagesOcred|type=="array") and (.meta.source=="ocr")' image.json >/dev/null
-          echo "✅ Image smoke passed" | tee -a "$GITHUB_STEP_SUMMARY"
+          
+          # Summarize useful diagnostics (non-sensitive)
+          echo "✅ Image OCR smoke passed (engine=openai-vision)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Image base64 length: ${#B64}" | tee -a "$GITHUB_STEP_SUMMARY"
+          head -c 8 smoke.png | xxd -p | sed 's/^/PNG magic (hex): /' | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: PDF OCR smoke (/extract → Azure Read)
         env:
@@ -179,6 +198,8 @@ jobs:
             services/ocr-webhook/ready.json
             services/ocr-webhook/image.json
             services/ocr-webhook/pdf.json
+            services/ocr-webhook/smoke.png
+            services/ocr-webhook/body.json
             services/ocr-webhook/smoke.pdf
 
       - name: Stop webhook
