@@ -1,4 +1,5 @@
 // src/ocr.ts
+import crypto from 'node:crypto';
 import axios from 'axios';
 import { config } from './config.js';
 import logger from './logger.js';
@@ -6,8 +7,9 @@ import logger from './logger.js';
 export interface OcrRequest {
   mime: string;
   dataBase64: string;
-  languages: string[];
-  maxPages: number;
+  languages?: string[];
+  maxPages?: number;
+  requestId?: string;
 }
 
 export interface OcrResponse {
@@ -20,6 +22,17 @@ export interface OcrResponse {
   };
 }
 
+/**
+ * Computes deterministic HMAC-SHA256 signature header.
+ * @param secret Shared secret for HMAC
+ * @param body Exact request body bytes to sign
+ * @returns e.g. "sha256=<hex>"
+ */
+export function hmacHeader(secret: string, body: string | Buffer): string {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(typeof body === 'string' ? Buffer.from(body, 'utf8') : body);
+  return `sha256=${hmac.digest('hex')}`;
+}
 /**
  * Sends a document to the OCR webhook for text extraction.
  * @param request OCR request with base64 data and options
@@ -43,23 +56,81 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
       dataSize: request.dataBase64.length,
     });
 
-    const response = await axios.post<OcrResponse>(
-      config.ocrWebhookUrl,
-      request,
-      {
-        timeout: config.ocrTimeoutMs,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const payload: {
+      mime: string;
+      dataBase64: string;
+      languages?: string[];
+      maxPages?: number;
+    } = {
+      mime: request.mime,
+      dataBase64: request.dataBase64,
+    };
+    if (request.languages !== undefined) {
+      payload.languages = request.languages;
+    }
+    if (request.maxPages !== undefined) {
+      payload.maxPages = request.maxPages;
+    }
 
-    logger.info('OCR request successful', {
-      pagesOcred: response.data.pagesOcred?.length || 0,
-      textLength: response.data.text?.length || 0,
+    const body: string = JSON.stringify(payload);
+    const secret = (config.ocrWebhookSecret ?? '').trim();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (request.requestId) {
+      headers['X-Request-ID'] = request.requestId;
+    }
+
+    if (secret.length > 0) {
+      headers['X-Signature'] = hmacHeader(secret, body);
+      logger.debug('OCR HMAC', {
+        bodyLen: body.length,
+        sigPrefix: headers['X-Signature']?.slice(0, 16),
+      });
+    }
+
+    const response = await axios.post(config.ocrWebhookUrl, body, {
+      timeout: config.ocrTimeoutMs,
+      headers,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      transformRequest: [(data: string) => data],
     });
 
-    return response.data;
+    const raw = response.data as unknown;
+    if (!raw || typeof raw !== 'object') {
+      throw new Error('Invalid OCR response payload');
+    }
+    const responsePayload = raw as { text?: unknown; pagesOcred?: unknown; meta?: unknown };
+    const textValue: unknown = responsePayload.text;
+    if (typeof textValue !== 'string') {
+      throw new Error('OCR response missing text');
+    }
+    const pagesValue: unknown = responsePayload.pagesOcred;
+    if (pagesValue !== undefined && !Array.isArray(pagesValue)) {
+      throw new Error('OCR response pagesOcred must be an array');
+    }
+    const metaValue: unknown = responsePayload.meta;
+    if (metaValue !== undefined && (metaValue === null || typeof metaValue !== 'object')) {
+      throw new Error('OCR response meta must be an object');
+    }
+    const pagesOcred = Array.isArray(pagesValue)
+      ? pagesValue.filter((entry): entry is number => typeof entry === 'number')
+      : [];
+    const meta = metaValue && typeof metaValue === 'object' ? (metaValue as OcrResponse['meta']) : undefined;
+    const result: OcrResponse = {
+      text: textValue,
+      pagesOcred,
+      ...(meta ? { meta } : {}),
+    };
+
+    logger.info('OCR request successful', {
+      pagesOcred: result.pagesOcred.length,
+      textLength: result.text.length,
+    });
+
+    return result;
   } catch (error) {
     // Robust URL redaction (avoid throwing in error handler)
     const redactedUrl = (() => {

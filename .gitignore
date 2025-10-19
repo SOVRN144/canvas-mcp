@@ -4,3 +4,8 @@ dist
 .DS_Store
 server.log
 tmp-repo-match/
+
+# test coverage
+coverage/
+.nyc_output/
+coverage/**/lcov-report/

@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { getAssignment } from './canvas.js';
 import { config, getSanitizedCanvasToken, validateConfig, DEFAULTS } from './config.js';
-import { extractFileContent, downloadFileAsBase64 } from './files.js';
+import { extractFileContent, downloadFileAsBase64, MAX_EXTRACT_MB } from './files.js';
 import logger from './logger.js';
 import { sanitizeHtmlSafe, htmlToText, truncate, sanitizeHtmlWithLimit } from './sanitize.js';
 import { isMain } from './util/isMain.js';
@@ -770,7 +770,7 @@ const createServer = () => {
           }
           
           // EARLY GUARD 2: Check size BEFORE downloading
-          const maxExtractMB = 15; // Default from files.ts MAX_EXTRACT_MB
+          const maxExtractMB = MAX_EXTRACT_MB;
           if (isOversized(fileMeta.size, maxExtractMB)) {
             const mb = Math.round(fileMeta.size / (1024 * 1024));
             throw new Error(`File ${fileId}: too large for extraction (${mb}MB > ${maxExtractMB}MB limit). Use download_file instead.`);

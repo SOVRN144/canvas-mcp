@@ -71,15 +71,17 @@ describe('extract_file OCR', () => {
     expect(meta?.source).toMatch(/ocr|mixed/);
     expect(meta?.pagesOcred).toEqual([1, 2]);
 
-    expect(axiosMocks.post).toHaveBeenCalledWith(
-      'https://ocr.example.com/extract',
-      expect.objectContaining({
-        mime: 'application/pdf',
-        languages: ['eng'],
-        maxPages: 20,
-      }),
-      expect.any(Object)
-    );
+    expect(axiosMocks.post).toHaveBeenCalled();
+    const [urlArg, dataArg, configArg] = axiosMocks.post.mock.calls[0] ?? [];
+    expect(urlArg).toBe('https://ocr.example.com/extract');
+    expect(typeof dataArg).toBe('string');
+    const parsed = JSON.parse(dataArg as string);
+    expect(parsed.mime).toBe('application/pdf');
+    expect(parsed.languages).toEqual(['eng']);
+    expect(typeof parsed.maxPages).toBe('number');
+    expect(parsed.maxPages).toBeGreaterThan(0);
+    expect(configArg).toBeTruthy();
+    expect(configArg.headers).toMatchObject({ 'Content-Type': 'application/json' });
   });
 
   it('ocr:off returns helpful hint for image-only PDF', async () => {

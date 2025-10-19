@@ -45,6 +45,7 @@ export async function loadAppWithEnv(
   const previousCanvasToken = config.canvasToken;
   const previousOcrProvider = config.ocrProvider;
   const previousOcrWebhook = config.ocrWebhookUrl;
+  const previousOcrWebhookSecret = config.ocrWebhookSecret;
   const nextEnv = { ...previousEnv, DISABLE_HTTP_LISTEN: '1', ...overrides };
   Object.assign(process.env, nextEnv);
   config.disableHttpListen = true;
@@ -59,6 +60,9 @@ export async function loadAppWithEnv(
   }
   if (overrides.OCR_WEBHOOK_URL) {
     config.ocrWebhookUrl = overrides.OCR_WEBHOOK_URL;
+  }
+  if (overrides.OCR_WEBHOOK_SECRET) {
+    config.ocrWebhookSecret = overrides.OCR_WEBHOOK_SECRET;
   }
 
   const httpModule = await import('../src/http.js');
@@ -97,6 +101,7 @@ export async function loadAppWithEnv(
     config.canvasToken = previousCanvasToken;
     config.ocrProvider = previousOcrProvider;
     config.ocrWebhookUrl = previousOcrWebhook;
+    config.ocrWebhookSecret = previousOcrWebhookSecret;
   };
 
   return { app, request, sessionId, restoreEnv };
