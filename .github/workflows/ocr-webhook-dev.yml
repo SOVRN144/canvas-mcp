@@ -7,11 +7,6 @@ on:
     paths:
       - 'services/ocr-webhook/**'
       - '.github/workflows/ocr-webhook-dev.yml'
-  # optional:
-  # pull_request:
-  #   paths:
-  #     - 'services/ocr-webhook/**'
-  #     - '.github/workflows/ocr-webhook-dev.yml'
 
 permissions:
   contents: read
@@ -42,7 +37,7 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: Start webhook (background) with environment vars/secrets
+      - name: Start webhook (background) with env/secret values
         env:
           PORT: ${{ vars.PORT }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL }}
@@ -60,26 +55,131 @@ jobs:
           AZURE_VISION_KEY: ${{ secrets.AZURE_VISION_KEY }}
           OCR_WEBHOOK_SECRET: ${{ secrets.OCR_WEBHOOK_SECRET }}
         run: |
-          echo "Starting webhook on port $PORT (log level: $LOG_LEVEL)…"
+          set -euo pipefail
+          : "${PORT:?PORT not set in environment vars}"
+          echo "Starting webhook on port $PORT (log level: ${LOG_LEVEL:-info})…"
           node server.js > server.log 2>&1 & echo $! > server.pid
 
+          sleep 1
+          if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+            echo "❌ Server failed to start (no process)"
+            [[ -f server.log ]] && tail -n +1 server.log
+            exit 1
+          fi
+
           echo "Waiting for /healthz…"
+          ok=0
           for i in {1..30}; do
-            curl -sf "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+            if curl -sSf --max-time 3 "http://127.0.0.1:${PORT}/healthz" >/dev/null; then
+              ok=1; break
+            fi
             sleep 1
           done
+          if [[ "$ok" -ne 1 ]]; then
+            echo "❌ Health check failed - server did not become healthy in time"
+            exit 1
+          fi
 
-          echo "Healthz:" >> "$GITHUB_STEP_SUMMARY"
-          curl -s "http://127.0.0.1:${PORT}/healthz" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Health & Ready → summary
+        run: |
+          set -euo pipefail
+          echo "### Healthz" >> "$GITHUB_STEP_SUMMARY"
+          curl -sS --fail-with-body --max-time 5 "http://127.0.0.1:${{ vars.PORT }}/healthz" | tee -a "$GITHUB_STEP_SUMMARY"
 
-          echo -e "\nReady:" >> "$GITHUB_STEP_SUMMARY"
-          curl -s "http://127.0.0.1:${PORT}/ready" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo -e "\n### Ready" >> "$GITHUB_STEP_SUMMARY"
+          curl -sS --fail-with-body --max-time 5 "http://127.0.0.1:${{ vars.PORT }}/ready" | tee ready.json | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Show last 50 server log lines (for debugging)
+      - name: Image OCR smoke (/extract → OpenAI Vision)
+        env:
+          PORT: ${{ vars.PORT }}
+          OCR_WEBHOOK_SECRET: ${{ secrets.OCR_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          # Determine if OpenAI is configured via /ready
+          OPENAI_READY=$(jq -r '.openai // false' ready.json)
+          if [[ "$OPENAI_READY" != "true" ]]; then
+            echo "Skipping image smoke: openai=false" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # 1x1 transparent PNG (base64)
+          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII='
+
+          # Build payload and HMAC signature
+          PAYLOAD=$(jq -nc --arg m 'image/png' --arg d "$IMG_B64" '{mime:$m, dataBase64:$d}')
+          SIG=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -binary | xxd -p -c 256)
+          REQID="ci-image-smoke-$(date +%s)"
+
+          # Call /extract
+          curl -sS --fail-with-body --max-time 60 "http://127.0.0.1:${PORT}/extract" \
+            -H 'content-type: application/json' \
+            -H "x-signature: sha256=$SIG" \
+            -H "x-request-id: $REQID" \
+            -d "$PAYLOAD" | tee image.json
+
+          # Assert response shape (do not require non-empty text; 1x1 PNG may yield empty)
+          jq -e '.meta.engine=="openai-vision" and (.pagesOcred|type=="array") and (.meta.source=="ocr")' image.json >/dev/null
+          echo "✅ Image smoke passed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: PDF OCR smoke (/extract → Azure Read)
+        env:
+          PORT: ${{ vars.PORT }}
+          OCR_WEBHOOK_SECRET: ${{ secrets.OCR_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          AZURE_READY=$(jq -r '.azure // false' ready.json)
+          if [[ "$AZURE_READY" != "true" ]]; then
+            echo "Skipping PDF smoke: azure=false" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Generate a tiny 1-page PDF with pdf-lib on the runner
+          node - <<'NODE'
+          import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+          import fs from "fs";
+          const run = async () => {
+            const pdfDoc = await PDFDocument.create();
+            const page = pdfDoc.addPage([240, 140]);
+            const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+            page.drawText("OCR SMOKE", { x: 24, y: 70, size: 18, font, color: rgb(0,0,0) });
+            const bytes = await pdfDoc.save();
+            fs.writeFileSync("smoke.pdf", Buffer.from(bytes));
+          };
+          await run();
+          NODE
+
+          B64=$(base64 -w 0 smoke.pdf || base64 < smoke.pdf | tr -d '\n')
+
+          PAYLOAD=$(jq -nc --arg m 'application/pdf' --arg d "$B64" '{mime:$m, dataBase64:$d, maxPages:1}')
+          SIG=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -binary | xxd -p -c 256)
+          REQID="ci-pdf-smoke-$(date +%s)"
+
+          curl -sS --fail-with-body --max-time 180 "http://127.0.0.1:${PORT}/extract" \
+            -H 'content-type: application/json' \
+            -H "x-signature: sha256=$SIG" \
+            -H "x-request-id: $REQID" \
+            -d "$PAYLOAD" | tee pdf.json
+
+          jq -e '.meta.engine=="azure-read" and (.pagesOcred|type=="array") and (.meta.source=="ocr")' pdf.json >/dev/null
+          echo "✅ PDF smoke passed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Show last 100 server log lines
         if: always()
         run: |
           echo '--- server.log (tail) ---'
-          tail -n 50 server.log || true
+          tail -n 100 server.log || true
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-webhook-dev-artifacts
+          path: |
+            services/ocr-webhook/server.log
+            services/ocr-webhook/ready.json
+            services/ocr-webhook/image.json
+            services/ocr-webhook/pdf.json
+            services/ocr-webhook/smoke.pdf
 
       - name: Stop webhook
         if: always()
