@@ -11,7 +11,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o";
-const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 15000);
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
 
 const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
 const AZURE_VISION_KEY = process.env.AZURE_VISION_KEY;
@@ -146,31 +146,37 @@ async function ocrWithOpenAI({ mime, data }) {
   const client = new OpenAI({ apiKey: OPENAI_API_KEY });
   const started = Date.now();
 
-  // Use Responses API for multimodal; pass base64 bytes + mime directly.
-  // NOTE: we must pass AbortSignal via the 2nd options arg so timeouts cancel the HTTP call.
+  // Build data URL for Responses API
+  const dataUrl = `data:${mime};base64,${data.toString("base64")}`;
+
+  // Use withTimeout helper so we return 504 on timeouts (as documented)
   const run = async (signal) => {
     const resp = await client.responses.create(
       {
-        model: OPENAI_VISION_MODEL, // gpt-4o or gpt-4o-mini
+        model: OPENAI_VISION_MODEL, // default set above; keep override support
         temperature: 0,
         input: [
           {
             role: "user",
             content: [
-              { type: "input_text", text: "Extract the exact text from this image." },
-              { type: "input_image", image: { data: data.toString("base64"), mime_type: mime } }
+              { type: "input_text", text: "Extract the exact text from this image. Return only the raw text. No commentary." },
+              { type: "input_image", image_url: dataUrl } // spec: string data URL
             ]
           }
         ]
       },
-      { signal }
+      { signal } // AbortSignal must be the 2nd arg to cancel the HTTP call
     );
-    // SDK helper: output_text concatenates tool/assistant segments
+
     const text = (resp.output_text || "").trim();
-    return { text, pagesOcred: [1], meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" } };
+    return {
+      text,
+      pagesOcred: [1],
+      meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" }
+    };
   };
 
-  return await withTimeout(run, OPENAI_TIMEOUT_MS, "OpenAI request timed out");
+  return await withTimeout(run, OPENAI_TIMEOUT_MS, "OpenAI OCR timed out");
 }
 
 // ---- optional PDF pre-slicing to enforce maxPages & reduce cost ----

@@ -117,7 +117,7 @@ jobs:
             -H "x-request-id: $REQID" \
             -d "$PAYLOAD" | tee image.json
 
-          # Assert response shape (do not require non-empty text; 1x1 PNG may yield empty)
+          # Assert response shape (do not require non-empty text; 2×2 PNG may yield empty)
           jq -e '.meta.engine=="openai-vision" and (.pagesOcred|type=="array") and (.meta.source=="ocr")' image.json >/dev/null
           echo "✅ Image smoke passed" | tee -a "$GITHUB_STEP_SUMMARY"
 
