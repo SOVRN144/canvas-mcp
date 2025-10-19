@@ -20,7 +20,7 @@ function fail(fileId: number, msg: string): never {
 // Helper for consistent PPTX slide limit error message
 const errPptxTooManySlides = (id: number | string, actual: number, limit: number) =>
   `File ${id}: PPTX file has too many slides (${actual} > ${limit})`;
-const MAX_EXTRACT_MB = (() => {
+export const MAX_EXTRACT_MB = (() => {
   const raw = process.env.MAX_EXTRACT_MB;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
