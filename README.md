@@ -45,6 +45,12 @@ Copy `.env.example` to `.env` and adjust values as needed:
 
 All text extraction tools support a `maxChars` parameter to control output length. When not specified, the defaults above apply.
 
+### OCR Webhook Configuration
+- `MIN_IMAGE_PX` (default: `0`) — Reject ultra-small images before sending them to the OpenAI Vision path. Set `MIN_IMAGE_PX=50` for more stable OpenAI responses and to avoid fully transparent or 1×1 placeholders. When left at `0`, validation is disabled.
+- `AZURE_POLL_MAX_ATTEMPTS` (default: `60`) — Maximum GET polls against Azure Read before bailing out. The webhook honors `Retry-After` headers; otherwise it polls every second. POST calls are billable; repeated GET polls are not but they still count toward Azure metrics.
+- The MCP caller serializes the payload once and posts the literal JSON string with an HMAC computed over those exact bytes. If you proxy or mutate the request body, the signature will no longer match and the webhook will return 401.
+- **Troubleshooting 401**: double-check that both services share the exact `OCR_WEBHOOK_SECRET` (no trailing whitespace) and that intermediaries are not re-encoding the JSON. The MCP caller uses an identity `transformRequest` so Axios sends the original string untouched.
+
 ## Smoke
 ```bash
 H=$(mktemp)
