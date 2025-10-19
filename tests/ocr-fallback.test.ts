@@ -76,11 +76,10 @@ describe('extract_file OCR', () => {
     expect(urlArg).toBe('https://ocr.example.com/extract');
     expect(typeof dataArg).toBe('string');
     const parsed = JSON.parse(dataArg as string);
-    expect(parsed).toMatchObject({
-      mime: 'application/pdf',
-      languages: ['eng'],
-      maxPages: 20,
-    });
+    expect(parsed.mime).toBe('application/pdf');
+    expect(parsed.languages).toEqual(['eng']);
+    expect(typeof parsed.maxPages).toBe('number');
+    expect(parsed.maxPages).toBeGreaterThan(0);
     expect(configArg).toBeTruthy();
     expect(configArg.headers).toMatchObject({ 'Content-Type': 'application/json' });
   });

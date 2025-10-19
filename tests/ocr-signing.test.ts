@@ -84,10 +84,12 @@ describe('OCR webhook signing', () => {
     expect(signature).toBe(hmacHeader('dev-secret-123456', dataArg as string));
     expect(configArg?.transformRequest).toBeTruthy();
     expect(Array.isArray(configArg.transformRequest)).toBe(true);
+    expect(configArg.transformRequest?.length).toBe(1);
     const transformer = configArg.transformRequest?.[0];
     expect(typeof transformer).toBe('function');
     expect(transformer?.('__test__')).toBe('__test__');
     expect(configArg?.maxBodyLength).toBe(Infinity);
+    expect(configArg?.timeout).toBe(config.ocrTimeoutMs);
   });
 
   it('omits signature when secret missing', async () => {
@@ -106,5 +108,11 @@ describe('OCR webhook signing', () => {
     expect(configArg?.headers?.['X-Signature']).toBeUndefined();
     expect(configArg?.transformRequest).toBeTruthy();
     expect(Array.isArray(configArg.transformRequest)).toBe(true);
+    expect(configArg.transformRequest?.length).toBe(1);
+    const transformer = configArg.transformRequest?.[0];
+    expect(typeof transformer).toBe('function');
+    expect(transformer?.('payload')).toBe('payload');
+    expect(configArg?.maxBodyLength).toBe(Infinity);
+    expect(configArg?.timeout).toBe(config.ocrTimeoutMs);
   });
 });
