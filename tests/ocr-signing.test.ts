@@ -26,6 +26,7 @@ describe('OCR webhook signing', () => {
   let envSnapshot: NodeJS.ProcessEnv;
   let previousProvider: typeof config.ocrProvider;
   let previousUrl: string;
+  let previousSecret: string;
 
   beforeEach(() => {
     axiosMocks.reset();
@@ -33,6 +34,7 @@ describe('OCR webhook signing', () => {
     envSnapshot = snapshotEnv();
     previousProvider = config.ocrProvider;
     previousUrl = config.ocrWebhookUrl;
+    previousSecret = config.ocrWebhookSecret ?? '';
     config.ocrProvider = 'webhook';
     config.ocrWebhookUrl = 'https://ocr.test/extract';
   });
@@ -41,6 +43,7 @@ describe('OCR webhook signing', () => {
     restoreEnv(envSnapshot);
     config.ocrProvider = previousProvider;
     config.ocrWebhookUrl = previousUrl;
+    config.ocrWebhookSecret = previousSecret;
     axiosMocks.reset();
     vi.restoreAllMocks();
   });
@@ -55,6 +58,7 @@ describe('OCR webhook signing', () => {
 
   it('posts literal body and signature when secret present', async () => {
     process.env.OCR_WEBHOOK_SECRET = 'dev-secret-123456';
+    config.ocrWebhookSecret = 'dev-secret-123456';
     axiosMocks.post.mockResolvedValueOnce({ data: { text: 'ok', pagesOcred: [] } });
 
     await performOcr({
@@ -94,6 +98,7 @@ describe('OCR webhook signing', () => {
 
   it('omits signature when secret missing', async () => {
     delete process.env.OCR_WEBHOOK_SECRET;
+    config.ocrWebhookSecret = '';
     axiosMocks.post.mockResolvedValueOnce({ data: { text: '', pagesOcred: [] } });
 
     await performOcr({
