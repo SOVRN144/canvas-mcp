@@ -770,13 +770,13 @@ const createServer = () => {
           }
           
           // EARLY GUARD 2: Check size BEFORE downloading
-          const maxExtractMB = MAX_EXTRACT_MB;
+          const maxExtractMB = 15; // Default from files.ts MAX_EXTRACT_MB
           if (isOversized(fileMeta.size, maxExtractMB)) {
             const mb = Math.round(fileMeta.size / (1024 * 1024));
             throw new Error(`File ${fileId}: too large for extraction (${mb}MB > ${maxExtractMB}MB limit). Use download_file instead.`);
           }
           
-          // Lazy-load OCR helpers to satisfy noUnusedLocals and keep cold path light
+          // Lazy-load OCR helpers
           const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
           
           // Check for DISABLE_NATIVE_PDF env flag
