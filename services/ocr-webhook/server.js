@@ -19,9 +19,10 @@ const AZURE_VISION_API_VERSION = process.env.AZURE_VISION_API_VERSION || "v3.2";
 const AZURE_POST_TIMEOUT_MS = Number(process.env.AZURE_POST_TIMEOUT_MS || 15000);
 const AZURE_POLL_MS = Number(process.env.AZURE_POLL_MS || 1500);
 const AZURE_POLL_TIMEOUT_MS = Number(process.env.AZURE_POLL_TIMEOUT_MS || 30000);
-const AZURE_RETRY_MAX = Number(process.env.AZURE_RETRY_MAX || 4);
+const AZURE_RETRY_MAX = Number(process.env.AZURE_RETRY_MAX || 5);
 const AZURE_RETRY_BASE_MS = Number(process.env.AZURE_RETRY_BASE_MS || 400);
 const AZURE_RETRY_JITTER_MS = Number(process.env.AZURE_RETRY_JITTER_MS || 250);
+const AZURE_RETRY_MAX_MS = Number(process.env.AZURE_RETRY_MAX_MS || 60000);
 
 const PDF_PRESLICE = String(process.env.PDF_PRESLICE || "0") === "1";
 const PDF_SOFT_LIMIT = String(process.env.PDF_SOFT_LIMIT || "1") === "1";
@@ -35,7 +36,7 @@ app.disable("x-powered-by");
 
 // capture raw body for HMAC verify
 app.use(express.json({
-  limit: `${Math.ceil(OCR_MAX_BYTES * 1.5)}b`,
+  limit: Math.ceil(OCR_MAX_BYTES * 1.5),
   verify: (req, _res, buf) => { req.rawBody = buf; }
 }));
 
@@ -101,6 +102,20 @@ function coerceMaxPages(v) {
   const n = Number.parseInt(String(v), 10);
   if (!Number.isFinite(n) || n <= 0) return OCR_MAX_PAGES;
   return Math.min(OCR_MAX_PAGES, Math.floor(n));
+}
+
+function parseRetryAfter(h) {
+  if (!h) return null;
+  const s = Array.isArray(h) ? h[0] : String(h);
+  const sec = Number(s);
+  if (Number.isFinite(sec) && sec >= 0) return sec * 1000;
+  const when = Date.parse(s);
+  if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  return null;
+}
+
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
 }
 
 async function withTimeout(promise, ms, onTimeoutMsg = "Request timed out") {
@@ -208,7 +223,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
   if (!opLoc) throw Object.assign(new Error("Azure Read missing Operation-Location"), { status: 502 });
   const opId = opLoc.split("/").pop();
 
-  // Poll with bounded retries/backoff for transient 429/5xx
+  // Poll with bounded retries/backoff for transient 429/5xx, honor Retry-After
   const deadline = Date.now() + AZURE_POLL_TIMEOUT_MS;
   let resultJson = null;
   let attempt = 0;
@@ -226,6 +241,40 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
         }
       );
 
+      const httpStatus = poll.status;
+
+      // Handle non-200 responses
+      if (httpStatus !== 200) {
+        // Fail fast for 4xx (except 429) and other non-retryable statuses
+        if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429) {
+          const e = new Error(`Azure poll HTTP ${httpStatus}`);
+          e.status = httpStatus;
+          e.detail = poll.data;
+          throw e;
+        }
+
+        // Retry 429 and 5xx with Retry-After support
+        if ((httpStatus === 429 || httpStatus >= 500) && attempt < AZURE_RETRY_MAX) {
+          const retryAfterMs = parseRetryAfter(poll.headers['retry-after']);
+          let delay;
+          if (retryAfterMs !== null) {
+            delay = clamp(retryAfterMs, AZURE_POLL_MS, AZURE_RETRY_MAX_MS);
+          } else {
+            delay = backoffMs(attempt);
+          }
+          attempt++;
+          await sleep(delay);
+          continue;
+        }
+
+        // Exceeded retries or other error
+        const e = new Error(`Azure poll HTTP ${httpStatus}`);
+        e.status = httpStatus || 502;
+        e.detail = poll.data;
+        throw e;
+      }
+
+      // HTTP 200 - check operation status
       const st = poll.data?.status;
       if (st === "succeeded") { resultJson = poll.data; break; }
       if (st === "failed") {
@@ -238,15 +287,14 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
       continue;
 
     } catch (err) {
-      const status = err?.response?.status || err?.status || 0;
-      if ((status === 429 || (status >= 500 && status < 600)) && attempt < AZURE_RETRY_MAX) {
-        await sleep(backoffMs(attempt++));
-        continue;
+      // Axios errors (network, timeout, etc.)
+      if (!err.response) {
+        throw Object.assign(new Error("Azure Read network error"), { status: 502, detail: err.message });
       }
-      throw Object.assign(new Error("Azure Read poll error"), { status: status || 502, detail: err?.response?.data });
+      // Re-throw errors we've already handled above
+      throw err;
     }
   }
-
 
   if (!resultJson) throw Object.assign(new Error("Azure Read timeout"), { status: 408 });
 
@@ -279,6 +327,10 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
 
 // ---- POST /extract ----
 app.post("/extract", async (req, res) => {
+  // Request-ID passthrough for log correlation
+  const requestId = req.get("x-request-id") || crypto.randomUUID();
+  res.set("X-Request-ID", requestId);
+
   try {
     if (!verifySignature(req)) return bad(res, 401, "Invalid signature", { code: "invalid_signature" });
 
@@ -296,7 +348,7 @@ app.post("/extract", async (req, res) => {
 
     if (mime.startsWith("image/")) {
       const out = await ocrWithOpenAI({ mime, data: buf });
-      return res.json(out);
+      return res.json({ ...out, requestId });
     } else if (mime === "application/pdf") {
       const effMaxPages = coerceMaxPages(maxPages);
 
@@ -320,17 +372,16 @@ app.post("/extract", async (req, res) => {
       }
 
       const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint });
-      return res.json(out);
+      return res.json({ ...out, requestId });
     } else {
       return bad(res, 415, `Unsupported mime: ${mime}`, { code: "unsupported_mime" });
     }
   } catch (err) {
     const code = err.status || 500;
-    const rid = crypto.randomUUID();
     if (LOG_LEVEL !== "silent") {
-      console.error(`[${rid}] OCR error`, { code, message: err.message });
+      console.error(`[${requestId}] OCR error`, { code, message: err.message });
     }
-    return res.status(code).json({ error: { code: String(code), httpStatus: code, message: "OCR failed", requestId: rid } });
+    return res.status(code).json({ error: { code: String(code), httpStatus: code, message: "OCR failed", requestId } });
   }
 });
 

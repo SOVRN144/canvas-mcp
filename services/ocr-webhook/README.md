@@ -18,9 +18,10 @@ HTTP service that accepts `{ mime, dataBase64, languages?, maxPages? }` and retu
 - `AZURE_POST_TIMEOUT_MS` (default `15000`)
 - `AZURE_POLL_MS` (default `1500`)
 - `AZURE_POLL_TIMEOUT_MS` (default `30000`) — Azure path returns **408** on poll timeout
-- `AZURE_RETRY_MAX` (default `4`) — transient 429/5xx retries during polling
+- `AZURE_RETRY_MAX` (default `5`) — transient 429/5xx retries during polling
 - `AZURE_RETRY_BASE_MS` (default `400`)
 - `AZURE_RETRY_JITTER_MS` (default `250`)
+- `AZURE_RETRY_MAX_MS` (default `60000`) — ceiling for Retry-After parsing and backoff delays
 - `PDF_PRESLICE` (default `0`) — set to `1` to enable in-memory page trimming
 - `PDF_SOFT_LIMIT` (default `1`) — when `PDF_PRESLICE=0`, reject PDFs whose page count exceeds `maxPages`/`OCR_MAX_PAGES` (prevents unexpected Azure spend)
 - `OCR_WEBHOOK_SECRET` (HMAC; if set, include `X-Signature: sha256=<hex>` over **raw** body)
@@ -53,6 +54,8 @@ curl -s http://127.0.0.1:8080/ready | jq .
 
 HMAC covers the raw body. Header must be: `X-Signature: sha256=<hex>`.
 
+**Request-ID correlation**: Send `X-Request-ID` header to correlate logs; the service echoes it in response headers and includes `requestId` in the response body.
+
 ### Image:
 
 ```bash
@@ -63,6 +66,7 @@ SIG=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -b
 
 curl -s http://127.0.0.1:8080/extract \
   -H 'content-type: application/json' \
+  -H 'X-Request-ID: demo-123' \
   -H "x-signature: sha256=$SIG" \
   -d "$PAYLOAD" | jq .
 ```
@@ -114,6 +118,7 @@ export OCR_TIMEOUT_MS=20000
 {
   "text": "…",
   "pagesOcred": [1,2],
+  "requestId": "demo-123",
   "meta": {
     "engine": "azure-read|openai-vision",
     "source": "ocr",
@@ -124,10 +129,11 @@ export OCR_TIMEOUT_MS=20000
 ```
 
 ## Notes
+- **Request-ID passthrough**: Send `X-Request-ID` header to correlate logs; the service echoes it in response headers and includes `requestId` in both success and error responses.
 - **Language hints**: You may pass `languages` as an array or string; only the first is forwarded to Azure as `language`. If unsure, omit it—incorrect hints can reduce recall.
 - **Pre-slicing**: Uses `pdf-lib` in memory. For very large PDFs, memory usage rises with page count; keep `OCR_MAX_BYTES` conservative and consider streaming input upstream if needed.
 - **Soft limit**: When `PDF_PRESLICE=0` and `PDF_SOFT_LIMIT=1`, PDFs exceeding `maxPages`/`OCR_MAX_PAGES` are rejected immediately to prevent unexpected Azure spend. Enable `PDF_PRESLICE=1` to automatically trim instead.
-- **Retries/backoff**: Polling handles transient 429/5xx with capped exponential backoff + jitter. Long timeouts still surface a 408.
+- **Azure polling**: The poller treats non-200 HTTP responses as errors. On 429/5xx, it retries up to `AZURE_RETRY_MAX`, honoring `Retry-After` headers (supports both seconds and HTTP-date formats) with clamping to `[AZURE_POLL_MS, AZURE_RETRY_MAX_MS]`. Other 4xx statuses fail fast. Long timeouts surface a 408.
 - **Timeout semantics**: OpenAI path returns **504** on timeout; Azure path returns **408** on internal poll timeout.
 - **Error responses**: All errors include `{ error: { code: string, httpStatus: number, message: string, ...extra } }` format.
 - **Base64 validation**: Strict validation with canonical form checking to prevent malformed input.
