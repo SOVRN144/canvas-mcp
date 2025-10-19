@@ -162,7 +162,7 @@ SOFTWARE.
 
 ### 8. CII Best Practices Badge
 **Status:** Optional certification  
-**Action:** Register at https://bestpractices.coreinfrastructure.org if desired
+**Action:** Register at [https://bestpractices.coreinfrastructure.org](https://bestpractices.coreinfrastructure.org) if desired
 
 ---
 
