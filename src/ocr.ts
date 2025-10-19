@@ -22,11 +22,6 @@ export interface OcrResponse {
   };
 }
 
-/** Returns `sha256=<hex>` for a given body string */
-export function hmacHeader(secret: string, body: string): string {
-  return 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');
-}
-
 /**
  * Sends a document to the OCR webhook for text extraction.
  * @param request OCR request with base64 data and options
