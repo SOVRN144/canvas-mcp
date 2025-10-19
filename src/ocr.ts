@@ -23,6 +23,17 @@ export interface OcrResponse {
 }
 
 /**
+ * Computes deterministic HMAC-SHA256 signature header.
+ * @param secret Shared secret for HMAC
+ * @param body Exact request body bytes to sign
+ * @returns e.g. "sha256=<hex>"
+ */
+export function hmacHeader(secret: string, body: string | Buffer): string {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(typeof body === 'string' ? Buffer.from(body, 'utf8') : body);
+  return `sha256=${hmac.digest('hex')}`;
+}
+/**
  * Sends a document to the OCR webhook for text extraction.
  * @param request OCR request with base64 data and options
  * @returns OCR response with extracted text and page info
@@ -62,7 +73,7 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
     }
 
     const body: string = JSON.stringify(payload);
-    const secret = process.env.OCR_WEBHOOK_SECRET ?? '';
+    const secret = (config.ocrWebhookSecret ?? '').trim();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -73,15 +84,13 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
 
     if (secret.length > 0) {
       headers['X-Signature'] = hmacHeader(secret, body);
-      if (typeof logger.debug === 'function') {
-        logger.debug('OCR HMAC', {
-          bodyLen: body.length,
-          sigPrefix: headers['X-Signature']?.slice(0, 16),
-        });
-      }
+      logger.debug('OCR HMAC', {
+        bodyLen: body.length,
+        sigPrefix: headers['X-Signature']?.slice(0, 16),
+      });
     }
 
-    const response = await axios.post<OcrResponse>(config.ocrWebhookUrl, body, {
+    const response = await axios.post(config.ocrWebhookUrl, body, {
       timeout: config.ocrTimeoutMs,
       headers,
       maxBodyLength: Infinity,
