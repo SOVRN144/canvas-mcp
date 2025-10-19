@@ -1,0 +1,90 @@
+name: OCR Webhook (dev smokes)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/ocr-webhook/**'
+      - '.github/workflows/ocr-webhook-dev.yml'
+  # optional:
+  # pull_request:
+  #   paths:
+  #     - 'services/ocr-webhook/**'
+  #     - '.github/workflows/ocr-webhook-dev.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ocr-webhook-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        shell: bash
+        working-directory: services/ocr-webhook
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: services/ocr-webhook/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Start webhook (background) with environment vars/secrets
+        env:
+          PORT: ${{ vars.PORT }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          AZURE_VISION_API_VERSION: ${{ vars.AZURE_VISION_API_VERSION }}
+          AZURE_POLL_MS: ${{ vars.AZURE_POLL_MS }}
+          AZURE_POLL_TIMEOUT_MS: ${{ vars.AZURE_POLL_TIMEOUT_MS }}
+          AZURE_RETRY_MAX: ${{ vars.AZURE_RETRY_MAX }}
+          AZURE_RETRY_MAX_MS: ${{ vars.AZURE_RETRY_MAX_MS }}
+          OCR_MAX_BYTES: ${{ vars.OCR_MAX_BYTES }}
+          OCR_MAX_PAGES: ${{ vars.OCR_MAX_PAGES }}
+          PDF_PRESLICE: ${{ vars.PDF_PRESLICE }}
+          PDF_SOFT_LIMIT: ${{ vars.PDF_SOFT_LIMIT }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_VISION_ENDPOINT: ${{ secrets.AZURE_VISION_ENDPOINT }}
+          AZURE_VISION_KEY: ${{ secrets.AZURE_VISION_KEY }}
+          OCR_WEBHOOK_SECRET: ${{ secrets.OCR_WEBHOOK_SECRET }}
+        run: |
+          echo "Starting webhook on port $PORT (log level: $LOG_LEVEL)…"
+          node server.js > server.log 2>&1 & echo $! > server.pid
+
+          echo "Waiting for /healthz…"
+          for i in {1..30}; do
+            curl -sf "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+            sleep 1
+          done
+
+          echo "Healthz:" >> "$GITHUB_STEP_SUMMARY"
+          curl -s "http://127.0.0.1:${PORT}/healthz" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo -e "\nReady:" >> "$GITHUB_STEP_SUMMARY"
+          curl -s "http://127.0.0.1:${PORT}/ready" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Show last 50 server log lines (for debugging)
+        if: always()
+        run: |
+          echo '--- server.log (tail) ---'
+          tail -n 50 server.log || true
+
+      - name: Stop webhook
+        if: always()
+        run: |
+          if [[ -f server.pid ]]; then
+            kill "$(cat server.pid)" || true
+            sleep 1
+          fi
