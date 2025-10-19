@@ -17,9 +17,9 @@
     "audit:ci": "npm audit --audit-level=high",
     "audit:ci:prod": "npm audit --omit=dev --audit-level=high",
     "smoke:local": "DISABLE_HTTP_LISTEN=1 node --import tsx/esm src/smoke.local.ts",
+    "presmoke:ocr": "npm run build",
     "smoke:ocr": "node scripts/smoke-ocr-webhook.mjs",
-    "smoke:public": "bash scripts/smoke-public.sh",
-    "pretest:smoke": "npm run build"
+    "smoke:public": "bash scripts/smoke-public.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.20.0",
