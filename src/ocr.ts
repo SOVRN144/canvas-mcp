@@ -61,8 +61,15 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
 
     return response.data;
   } catch (error) {
-    const u = new URL(config.ocrWebhookUrl);
-    const redactedUrl = `${u.origin}${u.pathname}`;
+    // Robust URL redaction (avoid throwing in error handler)
+    const redactedUrl = (() => {
+      try {
+        const u = new URL(config.ocrWebhookUrl);
+        return `${u.origin}${u.pathname}`;
+      } catch {
+        return '(invalid OCR_WEBHOOK_URL)';
+      }
+    })();
     
     logger.error('OCR webhook request failed', {
       url: redactedUrl,

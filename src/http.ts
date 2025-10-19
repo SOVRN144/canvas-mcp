@@ -23,6 +23,57 @@ import { redactUrl } from './utils/url.js';
 // Validate config early to fail fast on misconfiguration
 validateConfig();
 
+const ALLOWED_MIME_TYPES = new Set<string>([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation', // pptx
+  'text/plain',
+  'text/csv',
+  'text/markdown',
+]);
+
+// Helper: check if mime type is allowed (normalize by removing charset params)
+function isAllowedMime(mimeType: string | undefined): boolean {
+  if (!mimeType) return false;
+  const normalized = mimeType.split(';')[0]?.trim().toLowerCase();
+  return normalized ? ALLOWED_MIME_TYPES.has(normalized) : false;
+}
+
+// Helper: determine content type from metadata (with fallback to extension)
+function getMimeTypeFromExtension(filename: string): string {
+  const parts = filename.toLowerCase().split('.');
+  const ext = parts.length > 1 ? parts.pop()! : '';
+  if (!ext) return 'application/octet-stream';
+  switch (ext) {
+    case 'pdf': return 'application/pdf';
+    case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    case 'txt': return 'text/plain';
+    case 'csv': return 'text/csv';
+    case 'md': return 'text/markdown';
+    default: return 'application/octet-stream';
+  }
+}
+
+// Helper: determine final content type from metadata
+function determineFinalContentType(fileMeta: { content_type?: string; display_name?: string; filename?: string }): string {
+  const metadataType = fileMeta.content_type?.split(';')[0]?.trim().toLowerCase();
+  const extensionType = getMimeTypeFromExtension(fileMeta.display_name || fileMeta.filename || '');
+  
+  // Prefer metadata type if it's specific (not octet-stream)
+  if (metadataType && metadataType !== 'application/octet-stream') {
+    return metadataType;
+  }
+  
+  return extensionType;
+}
+
+// Helper: check if file is oversized
+function isOversized(size: number, maxMB: number = 15): boolean {
+  const maxBytes = maxMB * 1024 * 1024;
+  return size > maxBytes;
+}
+
 const IS_MAIN = isMain(import.meta.url);
 
 // Process-level error handlers for fail-fast behavior (only when this module is entrypoint)
@@ -708,21 +759,41 @@ const createServer = () => {
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
           
-          // Lazy-load OCR helpers to satisfy noUnusedLocals and keep cold path light
+          // Get file metadata first (single GET)
+          const { getCanvasFileMeta } = await import('./files.js');
+          const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+          
+          // EARLY GUARD 1: Check content type BEFORE downloading
+          const finalContentType = determineFinalContentType(fileMeta);
+          if (!isAllowedMime(finalContentType)) {
+            throw new Error(`File ${fileId}: content type not allowed (${finalContentType || 'unknown'})`);
+          }
+          
+          // EARLY GUARD 2: Check size BEFORE downloading
+          const maxExtractMB = 15; // Default from files.ts MAX_EXTRACT_MB
+          if (isOversized(fileMeta.size, maxExtractMB)) {
+            const mb = Math.round(fileMeta.size / (1024 * 1024));
+            throw new Error(`File ${fileId}: too large for extraction (${mb}MB > ${maxExtractMB}MB limit). Use download_file instead.`);
+          }
+          
+          // Lazy-load OCR helpers
           const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
           
           // Check for DISABLE_NATIVE_PDF env flag
           const disableNativePdf = process.env.DISABLE_NATIVE_PDF === 'true' || process.env.DISABLE_NATIVE_PDF === '1';
           
-          // Get file metadata first
-          const { getCanvasFileMeta } = await import('./files.js');
-          const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
-          const isPdf = fileMeta.content_type?.includes('pdf') || fileMeta.filename?.toLowerCase().endsWith('.pdf');
+          const isPdf = finalContentType.includes('pdf');
+          
+          // EARLY GUARD 3: DISABLE_NATIVE_PDF + ocr:off (fail fast)
+          if (isPdf && disableNativePdf && ocr === 'off') {
+            throw new Error('Native PDF extraction is disabled (DISABLE_NATIVE_PDF=true) and OCR is off. Enable OCR or contact support.');
+          }
           
           let result: Awaited<ReturnType<typeof extractFileContent>>;
-          let extractSource: 'pdf-native' | 'ocr-webhook' | 'native-error-fallback->ocr' | 'native' = 'native';
+          let extractSource: 'pdf-native' | 'ocr-webhook' | 'native-error-fallback->ocr' | 'native';
           let pagesOcred: number[] | undefined;
           let ocrEngine: string | undefined;
+          let ocrDurationMs: number | undefined;
           
           // Force OCR path (skip native extraction entirely)
           if (isPdf && (ocr === 'force' || disableNativePdf)) {
@@ -767,6 +838,7 @@ const createServer = () => {
             
             pagesOcred = ocrResult.pagesOcred;
             ocrEngine = ocrResult.meta?.engine;
+            ocrDurationMs = ocrResult.meta?.durationMs;
             
             const truncated = truncate(ocrResult.text, limit);
             result = {
@@ -789,10 +861,8 @@ const createServer = () => {
               textLength: truncated.text.length,
               pagesOcred: pagesOcred?.length,
               engine: ocrEngine,
+              durationMs: ocrDurationMs,
             });
-          } else if (isPdf && disableNativePdf && ocr === 'off') {
-            // Native PDF disabled and OCR explicitly off - return error
-            throw new Error('Native PDF extraction is disabled (DISABLE_NATIVE_PDF=true) and OCR is off. Enable OCR or contact support.');
           } else {
             // Try native extraction first
             try {
@@ -852,6 +922,7 @@ const createServer = () => {
                   
                   pagesOcred = ocrResult.pagesOcred;
                   ocrEngine = ocrResult.meta?.engine;
+                  ocrDurationMs = ocrResult.meta?.durationMs;
                   
                   if (!fullText.trim()) {
                     // Use OCR text exclusively
@@ -881,6 +952,7 @@ const createServer = () => {
                     textLength: ocrResult.text.length,
                     pagesOcred: pagesOcred?.length,
                     engine: ocrEngine,
+                    durationMs: ocrDurationMs,
                   });
                 } else {
                   extractSource = isPdf ? 'pdf-native' : 'native';
@@ -936,6 +1008,7 @@ const createServer = () => {
                   
                   pagesOcred = ocrResult.pagesOcred;
                   ocrEngine = ocrResult.meta?.engine;
+                  ocrDurationMs = ocrResult.meta?.durationMs;
                   
                   const truncated = truncate(ocrResult.text, limit);
                   result = {
@@ -958,6 +1031,7 @@ const createServer = () => {
                     textLength: truncated.text.length,
                     pagesOcred: pagesOcred?.length,
                     engine: ocrEngine,
+                    durationMs: ocrDurationMs,
                   });
                 } catch (ocrError) {
                   // Both native and OCR failed - throw the OCR error with context
@@ -995,6 +1069,7 @@ const createServer = () => {
                 source: extractSource,
                 ...(ocrEngine ? { engine: ocrEngine } : {}),
                 ...(pagesOcred ? { pagesOcred } : {}),
+                ...(typeof ocrDurationMs === 'number' ? { durationMs: ocrDurationMs } : {}),
                 truncated: result.truncated,
               },
             },
