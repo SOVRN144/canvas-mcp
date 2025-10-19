@@ -102,8 +102,8 @@ jobs:
             exit 0
           fi
 
-          # 1x1 transparent PNG (base64)
-          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII='
+          # Known-good opaque 2x2 PNG (black). Avoids "unsupported image" from provider.
+          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR4nGP4z8AAAAMBAQAYl6a8AAAAAElFTkSuQmCC'
 
           # Build payload and HMAC signature
           PAYLOAD=$(jq -nc --arg m 'image/png' --arg d "$IMG_B64" '{mime:$m, dataBase64:$d}')

@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 8080;
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o";
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 15000);
 
 const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
@@ -144,24 +144,29 @@ async function countPdfPages(pdfBytes) {
 async function ocrWithOpenAI({ mime, data }) {
   if (!OPENAI_API_KEY) throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 500 });
   const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-  const dataUrl = `data:${mime};base64,${data.toString("base64")}`;
   const started = Date.now();
 
+  // Use Responses API for multimodal; pass base64 bytes + mime directly.
+  // NOTE: we must pass AbortSignal via the 2nd options arg so timeouts cancel the HTTP call.
   const run = async (signal) => {
-    const resp = await client.chat.completions.create({
-      model: OPENAI_VISION_MODEL,
-      temperature: 0,
-      messages: [
-        { role: "system", content: "You are an OCR engine. Return only the exact plain text you see. No commentary." },
-        { role: "user", content: [
-            { type: "text", text: "Extract the exact text from this image." },
-            { type: "image_url", image_url: { url: dataUrl } }
-          ]
-        }
-      ],
-      signal
-    });
-    const text = (resp.choices?.[0]?.message?.content || "").trim();
+    const resp = await client.responses.create(
+      {
+        model: OPENAI_VISION_MODEL, // gpt-4o or gpt-4o-mini
+        temperature: 0,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "Extract the exact text from this image." },
+              { type: "input_image", image: { data: data.toString("base64"), mime_type: mime } }
+            ]
+          }
+        ]
+      },
+      { signal }
+    );
+    // SDK helper: output_text concatenates tool/assistant segments
+    const text = (resp.output_text || "").trim();
     return { text, pagesOcred: [1], meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" } };
   };
 
