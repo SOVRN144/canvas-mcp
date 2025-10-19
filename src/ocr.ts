@@ -1,4 +1,5 @@
 // src/ocr.ts
+import crypto from 'node:crypto';
 import axios from 'axios';
 import { config } from './config.js';
 import logger from './logger.js';
@@ -6,8 +7,9 @@ import logger from './logger.js';
 export interface OcrRequest {
   mime: string;
   dataBase64: string;
-  languages: string[];
-  maxPages: number;
+  languages?: string[];
+  maxPages?: number;
+  requestId?: string;
 }
 
 export interface OcrResponse {
@@ -18,6 +20,11 @@ export interface OcrResponse {
     source?: string;
     durationMs?: number;
   };
+}
+
+/** Returns `sha256=<hex>` for a given body string */
+export function hmacHeader(secret: string, body: string): string {
+  return 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');
 }
 
 /**
@@ -43,16 +50,48 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
       dataSize: request.dataBase64.length,
     });
 
-    const response = await axios.post<OcrResponse>(
-      config.ocrWebhookUrl,
-      request,
-      {
-        timeout: config.ocrTimeoutMs,
-        headers: {
-          'Content-Type': 'application/json',
-        },
+    const payload: {
+      mime: string;
+      dataBase64: string;
+      languages?: string[];
+      maxPages?: number;
+    } = {
+      mime: request.mime,
+      dataBase64: request.dataBase64,
+    };
+    if (request.languages !== undefined) {
+      payload.languages = request.languages;
+    }
+    if (request.maxPages !== undefined) {
+      payload.maxPages = request.maxPages;
+    }
+
+    const body = JSON.stringify(payload);
+    const secret = process.env.OCR_WEBHOOK_SECRET ?? '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (request.requestId) {
+      headers['X-Request-ID'] = request.requestId;
+    }
+
+    if (secret.length > 0) {
+      headers['X-Signature'] = hmacHeader(secret, body);
+      if (typeof logger.debug === 'function') {
+        logger.debug('OCR HMAC', {
+          bodyLen: body.length,
+          sigPrefix: headers['X-Signature']?.slice(0, 16),
+        });
       }
-    );
+    }
+
+    const response = await axios.post<OcrResponse>(config.ocrWebhookUrl, body, {
+      timeout: config.ocrTimeoutMs,
+      headers,
+      maxBodyLength: Infinity,
+      transformRequest: [(data) => data],
+    });
 
     logger.info('OCR request successful', {
       pagesOcred: response.data.pagesOcred?.length || 0,
