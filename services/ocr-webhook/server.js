@@ -15,6 +15,7 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 15000);
 
 const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
 const AZURE_VISION_KEY = process.env.AZURE_VISION_KEY;
+const AZURE_VISION_API_VERSION = process.env.AZURE_VISION_API_VERSION || "v3.2";
 const AZURE_POST_TIMEOUT_MS = Number(process.env.AZURE_POST_TIMEOUT_MS || 15000);
 const AZURE_POLL_MS = Number(process.env.AZURE_POLL_MS || 1500);
 const AZURE_POLL_TIMEOUT_MS = Number(process.env.AZURE_POLL_TIMEOUT_MS || 30000);
@@ -56,8 +57,10 @@ app.get("/ready", (_req, res) => {
 });
 
 // helpers
-function bad(res, code, message, extra = {}) {
-  return res.status(code).json({ error: { code, message, ...extra } });
+function bad(res, httpStatus, message, extra = {}) {
+  const code = typeof extra.code === "string" ? extra.code : String(httpStatus);
+  const { code: _drop, ...rest } = extra;
+  return res.status(httpStatus).json({ error: { code, httpStatus, message, ...rest } });
 }
 
 function verifySignature(req) {
@@ -75,8 +78,15 @@ function verifySignature(req) {
   return a.length === e.length && crypto.timingSafeEqual(a, e);
 }
 
-function bytesFromBase64(b64) {
-  try { return Buffer.from(b64, "base64"); } catch { return null; }
+function bytesFromBase64Strict(b64) {
+  if (typeof b64 !== "string") return null;
+  const clean = b64.replace(/\s+/g, "");
+  const ok = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(clean);
+  if (!ok) return null;
+  const buf = Buffer.from(clean, "base64");
+  const canon = buf.toString("base64").replace(/=+$/, "");
+  const target = clean.replace(/=+$/, "");
+  return canon === target ? buf : null;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -85,6 +95,12 @@ function backoffMs(attempt) {
   const base = AZURE_RETRY_BASE_MS * Math.pow(2, attempt);
   const jitter = Math.floor(Math.random() * AZURE_RETRY_JITTER_MS);
   return base + jitter;
+}
+
+function coerceMaxPages(v) {
+  const n = Number.parseInt(String(v), 10);
+  if (!Number.isFinite(n) || n <= 0) return OCR_MAX_PAGES;
+  return Math.min(OCR_MAX_PAGES, Math.floor(n));
 }
 
 async function withTimeout(promise, ms, onTimeoutMsg = "Request timed out") {
@@ -116,7 +132,7 @@ async function ocrWithOpenAI({ mime, data }) {
   const dataUrl = `data:${mime};base64,${data.toString("base64")}`;
   const started = Date.now();
 
-  const run = async (_signal) => {
+  const run = async (signal) => {
     const resp = await client.chat.completions.create({
       model: OPENAI_VISION_MODEL,
       temperature: 0,
@@ -127,7 +143,8 @@ async function ocrWithOpenAI({ mime, data }) {
             { type: "image_url", image_url: { url: dataUrl } }
           ]
         }
-      ]
+      ],
+      signal
     });
     const text = (resp.choices?.[0]?.message?.content || "").trim();
     return { text, pagesOcred: [1], meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" } };
@@ -174,7 +191,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
   // Build submit URL with optional language hint; default to readingOrder=natural
   const qs = new URLSearchParams({ readingOrder: "natural" });
   if (languageHint) qs.set("language", languageHint);
-  const submitUrl = `${AZURE_VISION_ENDPOINT}/vision/v3.2/read/analyze?${qs.toString()}`;
+  const submitUrl = `${AZURE_VISION_ENDPOINT}/vision/${AZURE_VISION_API_VERSION}/read/analyze?${qs.toString()}`;
 
   // Submit
   const submit = await axios.post(submitUrl, toSend, {
@@ -201,7 +218,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
 
     try {
       const poll = await axios.get(
-        `${AZURE_VISION_ENDPOINT}/vision/v3.2/read/analyzeResults/${opId}`,
+        `${AZURE_VISION_ENDPOINT}/vision/${AZURE_VISION_API_VERSION}/read/analyzeResults/${opId}`,
         {
           headers: { "Ocp-Apim-Subscription-Key": AZURE_VISION_KEY },
           timeout: Math.max(2000, AZURE_POLL_MS),
@@ -263,15 +280,15 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
 // ---- POST /extract ----
 app.post("/extract", async (req, res) => {
   try {
-    if (!verifySignature(req)) return bad(res, 401, "Invalid signature");
+    if (!verifySignature(req)) return bad(res, 401, "Invalid signature", { code: "invalid_signature" });
 
     const { mime, dataBase64, languages, maxPages } = req.body || {};
     if (typeof mime !== "string" || typeof dataBase64 !== "string") {
-      return bad(res, 400, "Missing required fields: mime, dataBase64");
+      return bad(res, 400, "Missing required fields: mime, dataBase64", { code: "missing_fields" });
     }
-    const buf = bytesFromBase64(dataBase64);
-    if (!buf) return bad(res, 400, "dataBase64 is not valid base64");
-    if (buf.length > OCR_MAX_BYTES) return bad(res, 400, "Payload too large", { maxBytes: OCR_MAX_BYTES });
+    const buf = bytesFromBase64Strict(dataBase64);
+    if (!buf) return bad(res, 400, "dataBase64 is not valid base64", { code: "invalid_base64" });
+    if (buf.length > OCR_MAX_BYTES) return bad(res, 400, "Payload too large", { code: "payload_too_large", maxBytes: OCR_MAX_BYTES });
 
     // Optional language hint (Azure: wrong code can reduce recall; default to none)
     const languageHint = Array.isArray(languages) ? languages[0]
@@ -281,7 +298,7 @@ app.post("/extract", async (req, res) => {
       const out = await ocrWithOpenAI({ mime, data: buf });
       return res.json(out);
     } else if (mime === "application/pdf") {
-      const effMaxPages = Math.min(OCR_MAX_PAGES, Number(maxPages || OCR_MAX_PAGES));
+      const effMaxPages = coerceMaxPages(maxPages);
 
       if (!PDF_PRESLICE && PDF_SOFT_LIMIT) {
         try {
@@ -305,7 +322,7 @@ app.post("/extract", async (req, res) => {
       const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint });
       return res.json(out);
     } else {
-      return bad(res, 415, `Unsupported mime: ${mime}`);
+      return bad(res, 415, `Unsupported mime: ${mime}`, { code: "unsupported_mime" });
     }
   } catch (err) {
     const code = err.status || 500;
@@ -313,7 +330,7 @@ app.post("/extract", async (req, res) => {
     if (LOG_LEVEL !== "silent") {
       console.error(`[${rid}] OCR error`, { code, message: err.message });
     }
-    return res.status(code).json({ error: { code, message: "OCR failed", requestId: rid } });
+    return res.status(code).json({ error: { code: String(code), httpStatus: code, message: "OCR failed", requestId: rid } });
   }
 });
 

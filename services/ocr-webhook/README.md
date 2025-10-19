@@ -11,12 +11,13 @@ HTTP service that accepts `{ mime, dataBase64, languages?, maxPages? }` and retu
 ## Env
 - `OPENAI_API_KEY` (required for images)
 - `OPENAI_VISION_MODEL` (default `gpt-4o-mini`)
-- `OPENAI_TIMEOUT_MS` (default `15000`)
+- `OPENAI_TIMEOUT_MS` (default `15000`) — OpenAI path returns **504** on timeout
 - `AZURE_VISION_ENDPOINT` (e.g., `https://<res>.cognitiveservices.azure.com`)
 - `AZURE_VISION_KEY`
+- `AZURE_VISION_API_VERSION` (default `v3.2`) — Azure Read API version
 - `AZURE_POST_TIMEOUT_MS` (default `15000`)
 - `AZURE_POLL_MS` (default `1500`)
-- `AZURE_POLL_TIMEOUT_MS` (default `30000`)
+- `AZURE_POLL_TIMEOUT_MS` (default `30000`) — Azure path returns **408** on poll timeout
 - `AZURE_RETRY_MAX` (default `4`) — transient 429/5xx retries during polling
 - `AZURE_RETRY_BASE_MS` (default `400`)
 - `AZURE_RETRY_JITTER_MS` (default `250`)
@@ -127,6 +128,10 @@ export OCR_TIMEOUT_MS=20000
 - **Pre-slicing**: Uses `pdf-lib` in memory. For very large PDFs, memory usage rises with page count; keep `OCR_MAX_BYTES` conservative and consider streaming input upstream if needed.
 - **Soft limit**: When `PDF_PRESLICE=0` and `PDF_SOFT_LIMIT=1`, PDFs exceeding `maxPages`/`OCR_MAX_PAGES` are rejected immediately to prevent unexpected Azure spend. Enable `PDF_PRESLICE=1` to automatically trim instead.
 - **Retries/backoff**: Polling handles transient 429/5xx with capped exponential backoff + jitter. Long timeouts still surface a 408.
+- **Timeout semantics**: OpenAI path returns **504** on timeout; Azure path returns **408** on internal poll timeout.
+- **Error responses**: All errors include `{ error: { code: string, httpStatus: number, message: string, ...extra } }` format.
+- **Base64 validation**: Strict validation with canonical form checking to prevent malformed input.
+- **Docker**: Image runs as non-root user `app:app` with `HEALTHCHECK` for container orchestration.
 
 ## Acceptance Criteria
 
