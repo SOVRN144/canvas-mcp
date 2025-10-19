@@ -13,6 +13,11 @@ export interface OcrRequest {
 export interface OcrResponse {
   text: string;
   pagesOcred: number[];
+  meta?: {
+    engine?: string;
+    source?: string;
+    durationMs?: number;
+  };
 }
 
 /**

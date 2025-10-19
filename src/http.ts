@@ -708,81 +708,273 @@ const createServer = () => {
         return withCanvasErrors(async () => {
           const canvasClient = requireCanvasClient();
           
-          // Try native extraction first
-          let result = await extractFileContent(canvasClient, fileId, mode, limit);
-          let extractSource: 'native' | 'ocr' | 'mixed' = 'native';
-          let pagesOcred: number[] | undefined;
-          
-          const fullText = result.blocks.map(b => b.text).join('\n\n');
-          const isPdf = result.file.contentType === 'application/pdf';
-          
-          // Lazy-load OCR helpers only when needed to satisfy noUnusedLocals and keep cold path light
+          // Lazy-load OCR helpers to satisfy noUnusedLocals and keep cold path light
           const { performOcr, isImageOnly, ocrDisabledHint } = await import('./ocr.js');
           
-          // Handle OCR logic
-          if (isPdf && ocr !== 'off') {
-            const needsOcr = ocr === 'force' || isImageOnly(fullText);
+          // Check for DISABLE_NATIVE_PDF env flag
+          const disableNativePdf = process.env.DISABLE_NATIVE_PDF === 'true' || process.env.DISABLE_NATIVE_PDF === '1';
+          
+          // Get file metadata first
+          const { getCanvasFileMeta } = await import('./files.js');
+          const fileMeta = await getCanvasFileMeta(canvasClient, fileId);
+          const isPdf = fileMeta.content_type?.includes('pdf') || fileMeta.filename?.toLowerCase().endsWith('.pdf');
+          
+          let result: Awaited<ReturnType<typeof extractFileContent>>;
+          let extractSource: 'pdf-native' | 'ocr-webhook' | 'native-error-fallback->ocr' | 'native' = 'native';
+          let pagesOcred: number[] | undefined;
+          let ocrEngine: string | undefined;
+          
+          // Force OCR path (skip native extraction entirely)
+          if (isPdf && (ocr === 'force' || disableNativePdf)) {
+            logger.debug('Forcing OCR extraction (skipping native)', { 
+              fileId, 
+              reason: ocr === 'force' ? 'ocr:force' : 'DISABLE_NATIVE_PDF=true',
+            });
             
-            if (needsOcr) {
-              // Early OCR availability check
-              if (config.ocrProvider !== 'webhook') {
-                throw new Error(ocrDisabledHint());
-              }
-              if (!config.ocrWebhookUrl) {
-                throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
-              }
-              
-              if (!result.file.url) {
-                throw new Error('OCR download URL missing from extracted file metadata');
-              }
-              const authToken = getSanitizedCanvasToken();
-              const headers: Record<string, string> = {};
-              if (authToken) {
-                headers.Authorization = `Bearer ${authToken}`;
-              }
+            // Early OCR availability check
+            if (config.ocrProvider !== 'webhook') {
+              throw new Error('OCR webhook not configured; set OCR_PROVIDER=webhook and OCR_WEBHOOK_URL');
+            }
+            if (!config.ocrWebhookUrl) {
+              throw new Error('OCR webhook URL missing; set OCR_WEBHOOK_URL');
+            }
+            
+            if (!fileMeta.url) {
+              throw new Error('OCR download URL missing from Canvas file metadata');
+            }
+            
+            const authToken = getSanitizedCanvasToken();
+            const headers: Record<string, string> = {};
+            if (authToken) {
+              headers.Authorization = `Bearer ${authToken}`;
+            }
 
-              const downloadResponse = await canvasClient.get<ArrayBuffer>(result.file.url, {
-                responseType: 'arraybuffer',
-                headers,
+            const downloadResponse = await canvasClient.get<ArrayBuffer>(fileMeta.url, {
+              responseType: 'arraybuffer',
+              headers,
+            });
+            const buffer = Buffer.from(downloadResponse.data);
+            const dataBase64 = buffer.toString('base64');
+            
+            logger.debug('Calling OCR webhook', { fileId, mime: 'application/pdf', maxPages: maxOcrPages });
+            
+            const ocrResult = await performOcr({
+              mime: 'application/pdf',
+              dataBase64,
+              languages: ocrLanguages,
+              maxPages: maxOcrPages,
+            });
+            
+            pagesOcred = ocrResult.pagesOcred;
+            ocrEngine = ocrResult.meta?.engine;
+            
+            const truncated = truncate(ocrResult.text, limit);
+            result = {
+              file: {
+                id: fileMeta.id,
+                name: fileMeta.display_name || fileMeta.filename || `file-${fileMeta.id}`,
+                contentType: 'application/pdf',
+                size: fileMeta.size,
+                url: fileMeta.url,
+              },
+              mode,
+              charCount: truncated.text.length,
+              blocks: [{ type: 'paragraph', text: truncated.text }],
+              truncated: truncated.truncated,
+            };
+            extractSource = 'ocr-webhook';
+            
+            logger.debug('OCR extraction completed', { 
+              fileId, 
+              textLength: truncated.text.length,
+              pagesOcred: pagesOcred?.length,
+              engine: ocrEngine,
+            });
+          } else if (isPdf && disableNativePdf && ocr === 'off') {
+            // Native PDF disabled and OCR explicitly off - return error
+            throw new Error('Native PDF extraction is disabled (DISABLE_NATIVE_PDF=true) and OCR is off. Enable OCR or contact support.');
+          } else {
+            // Try native extraction first
+            try {
+              logger.debug('Attempting native extraction', { fileId, isPdf });
+              result = await extractFileContent(canvasClient, fileId, mode, limit);
+              
+              const fullText = result.blocks.map(b => b.text).join('\n\n');
+              
+              logger.debug('Native extraction completed', { 
+                fileId, 
+                isPdf,
+                textLength: fullText.length,
+                contentType: result.file.contentType,
               });
-              const buffer = Buffer.from(downloadResponse.data);
-              const dataBase64 = buffer.toString('base64');
               
-              // Perform OCR
-              const ocrResult = await performOcr({
-                mime: 'application/pdf',
-                dataBase64,
-                languages: ocrLanguages,
-                maxPages: maxOcrPages,
-              });
-              
-              pagesOcred = ocrResult.pagesOcred;
-              
-              if (ocr === 'force' || !fullText.trim()) {
-                // Use OCR text exclusively
-                const truncated = truncate(ocrResult.text, limit);
-                result = {
-                  ...result,
-                  blocks: [{ type: 'paragraph', text: truncated.text }],
-                  charCount: truncated.text.length,
-                  truncated: truncated.truncated,
-                };
-                extractSource = 'ocr';
+              // For PDFs with OCR enabled, check if we need OCR fallback
+              if (isPdf && ocr !== 'off') {
+                const needsOcr = isImageOnly(fullText);
+                
+                if (needsOcr) {
+                  logger.debug('Native PDF appears image-only; falling back to OCR', { 
+                    fileId, 
+                    nativeTextLength: fullText.length,
+                  });
+                  
+                  // Early OCR availability check
+                  if (config.ocrProvider !== 'webhook') {
+                    throw new Error(ocrDisabledHint());
+                  }
+                  if (!config.ocrWebhookUrl) {
+                    throw new Error('OCR webhook not configured; set OCR_WEBHOOK_URL');
+                  }
+                  
+                  if (!result.file.url) {
+                    throw new Error('OCR download URL missing from extracted file metadata');
+                  }
+                  const authToken = getSanitizedCanvasToken();
+                  const headers: Record<string, string> = {};
+                  if (authToken) {
+                    headers.Authorization = `Bearer ${authToken}`;
+                  }
+
+                  const downloadResponse = await canvasClient.get<ArrayBuffer>(result.file.url, {
+                    responseType: 'arraybuffer',
+                    headers,
+                  });
+                  const buffer = Buffer.from(downloadResponse.data);
+                  const dataBase64 = buffer.toString('base64');
+                  
+                  // Perform OCR
+                  const ocrResult = await performOcr({
+                    mime: 'application/pdf',
+                    dataBase64,
+                    languages: ocrLanguages,
+                    maxPages: maxOcrPages,
+                  });
+                  
+                  pagesOcred = ocrResult.pagesOcred;
+                  ocrEngine = ocrResult.meta?.engine;
+                  
+                  if (!fullText.trim()) {
+                    // Use OCR text exclusively
+                    const truncated = truncate(ocrResult.text, limit);
+                    result = {
+                      ...result,
+                      blocks: [{ type: 'paragraph', text: truncated.text }],
+                      charCount: truncated.text.length,
+                      truncated: truncated.truncated,
+                    };
+                    extractSource = 'ocr-webhook';
+                  } else {
+                    // Mix native + OCR
+                    const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
+                    const truncated = truncate(combined, limit);
+                    result = {
+                      ...result,
+                      blocks: [{ type: 'paragraph', text: truncated.text }],
+                      charCount: truncated.text.length,
+                      truncated: truncated.truncated,
+                    };
+                    extractSource = 'native-error-fallback->ocr'; // mixed case
+                  }
+                  
+                  logger.debug('OCR fallback completed', { 
+                    fileId, 
+                    textLength: ocrResult.text.length,
+                    pagesOcred: pagesOcred?.length,
+                    engine: ocrEngine,
+                  });
+                } else {
+                  extractSource = isPdf ? 'pdf-native' : 'native';
+                }
+              } else if (isPdf && ocr === 'off' && isImageOnly(fullText)) {
+                throw new Error(ocrDisabledHint());
               } else {
-                // Mix native + OCR
-                const combined = `${fullText}\n\n[OCR Text]\n${ocrResult.text}`;
-                const truncated = truncate(combined, limit);
-                result = {
-                  ...result,
-                  blocks: [{ type: 'paragraph', text: truncated.text }],
-                  charCount: truncated.text.length,
-                  truncated: truncated.truncated,
-                };
-                extractSource = 'mixed';
+                extractSource = isPdf ? 'pdf-native' : 'native';
+              }
+            } catch (nativeError) {
+              // Native extraction failed - fallback to OCR if enabled
+              logger.debug('Native extraction failed', { 
+                fileId, 
+                error: nativeError instanceof Error ? nativeError.message : String(nativeError),
+              });
+              
+              if (isPdf && ocr !== 'off') {
+                logger.debug('Falling back to OCR after native failure', { fileId });
+                
+                // Check OCR availability
+                if (config.ocrProvider !== 'webhook') {
+                  // Re-throw original error if OCR not available
+                  throw nativeError;
+                }
+                if (!config.ocrWebhookUrl) {
+                  throw nativeError;
+                }
+                
+                if (!fileMeta.url) {
+                  throw new Error('OCR download URL missing from Canvas file metadata');
+                }
+                
+                const authToken = getSanitizedCanvasToken();
+                const headers: Record<string, string> = {};
+                if (authToken) {
+                  headers.Authorization = `Bearer ${authToken}`;
+                }
+
+                try {
+                  const downloadResponse = await canvasClient.get<ArrayBuffer>(fileMeta.url, {
+                    responseType: 'arraybuffer',
+                    headers,
+                  });
+                  const buffer = Buffer.from(downloadResponse.data);
+                  const dataBase64 = buffer.toString('base64');
+                  
+                  const ocrResult = await performOcr({
+                    mime: 'application/pdf',
+                    dataBase64,
+                    languages: ocrLanguages,
+                    maxPages: maxOcrPages,
+                  });
+                  
+                  pagesOcred = ocrResult.pagesOcred;
+                  ocrEngine = ocrResult.meta?.engine;
+                  
+                  const truncated = truncate(ocrResult.text, limit);
+                  result = {
+                    file: {
+                      id: fileMeta.id,
+                      name: fileMeta.display_name || fileMeta.filename || `file-${fileMeta.id}`,
+                      contentType: 'application/pdf',
+                      size: fileMeta.size,
+                      url: fileMeta.url,
+                    },
+                    mode,
+                    charCount: truncated.text.length,
+                    blocks: [{ type: 'paragraph', text: truncated.text }],
+                    truncated: truncated.truncated,
+                  };
+                  extractSource = 'native-error-fallback->ocr';
+                  
+                  logger.debug('OCR fallback after native error completed', { 
+                    fileId, 
+                    textLength: truncated.text.length,
+                    pagesOcred: pagesOcred?.length,
+                    engine: ocrEngine,
+                  });
+                } catch (ocrError) {
+                  // Both native and OCR failed - throw the OCR error with context
+                  logger.error('Both native and OCR extraction failed', {
+                    fileId,
+                    nativeError: nativeError instanceof Error ? nativeError.message : String(nativeError),
+                    ocrError: ocrError instanceof Error ? ocrError.message : String(ocrError),
+                  });
+                  throw new Error(
+                    `File ${fileId}: extraction failed. Native: ${nativeError instanceof Error ? nativeError.message : String(nativeError)}. OCR: ${ocrError instanceof Error ? ocrError.message : String(ocrError)}`
+                  );
+                }
+              } else {
+                // OCR disabled or not a PDF - re-throw original error
+                throw nativeError;
               }
             }
-          } else if (isPdf && ocr === 'off' && isImageOnly(fullText)) {
-            throw new Error(ocrDisabledHint());
           }
           
           // Build preview
@@ -801,6 +993,7 @@ const createServer = () => {
               ...result,
               meta: {
                 source: extractSource,
+                ...(ocrEngine ? { engine: ocrEngine } : {}),
                 ...(pagesOcred ? { pagesOcred } : {}),
                 truncated: result.truncated,
               },

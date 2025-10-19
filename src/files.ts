@@ -176,21 +176,48 @@ export function truncateText(text: string, maxChars: number): { text: string; tr
   return { text: text.substring(0, sliceEnd) + TRUNCATE_SUFFIX, truncated: true };
 }
 
-async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
+/**
+ * Extracts text from PDF using pdf-parse library (native extraction).
+ * @param buffer PDF file buffer
+ * @param fileId File ID for error context
+ * @returns Extracted text (may be empty for image-only PDFs)
+ * @throws If pdf-parse fails to load or extract
+ */
+export async function extractPdfText(buffer: Buffer, fileId: number): Promise<string> {
+  const logContext = { fileId, bufferSize: buffer.length };
+  
   try {
-    // Dynamic ESM import to work in CI/runtime (no top-level require)
+    logger.debug('Starting native PDF extraction', logContext);
+    
+    // Dynamic ESM import with proper default/named export handling
     const mod: unknown = await import('pdf-parse');
-    const maybe =
-      typeof mod === 'function' ? mod : (mod as { default?: unknown }).default;
-    if (typeof maybe !== 'function') {
-      throw new Error('pdf-parse: missing callable export');
+    const pdfParse =
+      typeof mod === 'function'
+        ? mod
+        : (mod as { default?: unknown }).default;
+    
+    if (typeof pdfParse !== 'function') {
+      throw new Error('pdf-parse: missing callable export (neither default nor direct export is a function)');
     }
-    const pdfParse = maybe as (buf: Buffer) => Promise<{ text: string }>;
-    const { text } = await pdfParse(buffer);
-    return normalizeWhitespace(text);
+    
+    const typedPdfParse = pdfParse as (buf: Buffer) => Promise<{ text: string; numpages?: number }>;
+    const result = await typedPdfParse(buffer);
+    const text = normalizeWhitespace(result.text || '');
+    
+    logger.debug('Native PDF extraction completed', { 
+      ...logContext, 
+      textLength: text.length,
+      pages: result.numpages,
+    });
+    
+    return text;
   } catch (error) {
-    logger.error('Failed to extract PDF text', { fileId, error: String(error) });
-    throw new Error(`File ${fileId}: failed to extract text from PDF file`);
+    // Log the error but let the caller decide whether to fallback to OCR
+    logger.debug('Native PDF extraction failed', { 
+      ...logContext, 
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
 }
 
