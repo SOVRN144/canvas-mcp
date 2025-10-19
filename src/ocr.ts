@@ -66,7 +66,7 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
       payload.maxPages = request.maxPages;
     }
 
-    const body = JSON.stringify(payload);
+    const body: string = JSON.stringify(payload);
     const secret = process.env.OCR_WEBHOOK_SECRET ?? '';
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -90,15 +90,30 @@ export async function performOcr(request: OcrRequest): Promise<OcrResponse> {
       timeout: config.ocrTimeoutMs,
       headers,
       maxBodyLength: Infinity,
-      transformRequest: [(data) => data],
+      transformRequest: [(data: string) => data],
     });
+
+    const data = response.data as Partial<OcrResponse> | undefined;
+    if (!data || typeof data !== 'object') {
+      throw new Error('Invalid OCR response payload');
+    }
+    if (typeof data.text !== 'string') {
+      throw new Error('OCR response missing text');
+    }
+    if (data.pagesOcred !== undefined && !Array.isArray(data.pagesOcred)) {
+      throw new Error('OCR response pagesOcred must be an array');
+    }
+    const pagesOcred = Array.isArray(data.pagesOcred) ? data.pagesOcred : [];
 
     logger.info('OCR request successful', {
-      pagesOcred: response.data.pagesOcred?.length || 0,
-      textLength: response.data.text?.length || 0,
+      pagesOcred: pagesOcred.length,
+      textLength: data.text.length,
     });
 
-    return response.data;
+    return {
+      ...data,
+      pagesOcred,
+    } as OcrResponse;
   } catch (error) {
     // Robust URL redaction (avoid throwing in error handler)
     const redactedUrl = (() => {
