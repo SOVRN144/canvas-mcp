@@ -102,8 +102,8 @@ jobs:
             exit 0
           fi
 
-          # 1x1 transparent PNG (base64)
-          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII='
+          # Known-good opaque 2x2 PNG (black). Avoids "unsupported image" from provider.
+          IMG_B64='iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR4nGP4z8AAAAMBAQAYl6a8AAAAAElFTkSuQmCC'
 
           # Build payload and HMAC signature
           PAYLOAD=$(jq -nc --arg m 'image/png' --arg d "$IMG_B64" '{mime:$m, dataBase64:$d}')
@@ -117,7 +117,7 @@ jobs:
             -H "x-request-id: $REQID" \
             -d "$PAYLOAD" | tee image.json
 
-          # Assert response shape (do not require non-empty text; 1x1 PNG may yield empty)
+          # Assert response shape (do not require non-empty text; 2×2 PNG may yield empty)
           jq -e '.meta.engine=="openai-vision" and (.pagesOcred|type=="array") and (.meta.source=="ocr")' image.json >/dev/null
           echo "✅ Image smoke passed" | tee -a "$GITHUB_STEP_SUMMARY"
 

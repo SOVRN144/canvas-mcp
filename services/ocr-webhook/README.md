@@ -3,15 +3,15 @@
 HTTP service that accepts `{ mime, dataBase64, languages?, maxPages? }` and returns `{ text, pagesOcred, meta }`.
 
 ## Routing
-- `image/*` → OpenAI Vision (sync)
+- `image/*` → OpenAI Vision via Responses API with `image_url` as data URL (sync)
 - `application/pdf` → Azure Vision Read (async submit+poll with retry/backoff)
 - Optional **PDF pre-slicing**: if `PDF_PRESLICE=1`, the webhook trims the input PDF to `maxPages` (or `OCR_MAX_PAGES`) **before** sending to Azure (controls cost/latency).
 - **Soft page limit**: if `PDF_PRESLICE=0` and `PDF_SOFT_LIMIT=1`, PDFs whose page count exceeds `maxPages`/`OCR_MAX_PAGES` are rejected with a 400 error (prevents unexpected Azure spend).
 
 ## Env
 - `OPENAI_API_KEY` (required for images)
-- `OPENAI_VISION_MODEL` (default `gpt-4o-mini`)
-- `OPENAI_TIMEOUT_MS` (default `15000`) — OpenAI path returns **504** on timeout
+- `OPENAI_VISION_MODEL` (default `gpt-4o`) — supports `gpt-4o`, `gpt-4o-mini`, or other vision-capable models
+- `OPENAI_TIMEOUT_MS` (default `60000`) — OpenAI path returns **504** on timeout
 - `AZURE_VISION_ENDPOINT` (e.g., `https://<res>.cognitiveservices.azure.com`)
 - `AZURE_VISION_KEY`
 - `AZURE_VISION_API_VERSION` (default `v3.2`) — Azure Read API version

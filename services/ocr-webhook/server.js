@@ -10,8 +10,8 @@ const PORT = process.env.PORT || 8080;
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
-const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 15000);
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o";
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
 
 const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
 const AZURE_VISION_KEY = process.env.AZURE_VISION_KEY;
@@ -144,28 +144,39 @@ async function countPdfPages(pdfBytes) {
 async function ocrWithOpenAI({ mime, data }) {
   if (!OPENAI_API_KEY) throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 500 });
   const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-  const dataUrl = `data:${mime};base64,${data.toString("base64")}`;
   const started = Date.now();
 
+  // Build data URL for Responses API
+  const dataUrl = `data:${mime};base64,${data.toString("base64")}`;
+
+  // Use withTimeout helper so we return 504 on timeouts (as documented)
   const run = async (signal) => {
-    const resp = await client.chat.completions.create({
-      model: OPENAI_VISION_MODEL,
-      temperature: 0,
-      messages: [
-        { role: "system", content: "You are an OCR engine. Return only the exact plain text you see. No commentary." },
-        { role: "user", content: [
-            { type: "text", text: "Extract the exact text from this image." },
-            { type: "image_url", image_url: { url: dataUrl } }
-          ]
-        }
-      ],
-      signal
-    });
-    const text = (resp.choices?.[0]?.message?.content || "").trim();
-    return { text, pagesOcred: [1], meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" } };
+    const resp = await client.responses.create(
+      {
+        model: OPENAI_VISION_MODEL, // default set above; keep override support
+        temperature: 0,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "Extract the exact text from this image. Return only the raw text. No commentary." },
+              { type: "input_image", image_url: dataUrl } // spec: string data URL
+            ]
+          }
+        ]
+      },
+      { signal } // AbortSignal must be the 2nd arg to cancel the HTTP call
+    );
+
+    const text = (resp.output_text || "").trim();
+    return {
+      text,
+      pagesOcred: [1],
+      meta: { engine: "openai-vision", durationMs: Date.now() - started, source: "ocr" }
+    };
   };
 
-  return await withTimeout(run, OPENAI_TIMEOUT_MS, "OpenAI request timed out");
+  return await withTimeout(run, OPENAI_TIMEOUT_MS, "OpenAI OCR timed out");
 }
 
 // ---- optional PDF pre-slicing to enforce maxPages & reduce cost ----
