@@ -5,3 +5,4 @@ coverage
 .env
 .env.*
 src/smoke.local.ts
+services/ocr-webhook
