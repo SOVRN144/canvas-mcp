@@ -4,6 +4,7 @@ import morgan from "morgan";
 import axios from "axios";
 import OpenAI from "openai";
 import { PDFDocument } from "pdf-lib";
+import imageSize from "image-size";
 
 // ---- env & defaults ----
 const PORT = process.env.PORT || 8080;
@@ -17,12 +18,12 @@ const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(
 const AZURE_VISION_KEY = process.env.AZURE_VISION_KEY;
 const AZURE_VISION_API_VERSION = process.env.AZURE_VISION_API_VERSION || "v3.2";
 const AZURE_POST_TIMEOUT_MS = Number(process.env.AZURE_POST_TIMEOUT_MS || 15000);
-const AZURE_POLL_MS = Number(process.env.AZURE_POLL_MS || 1500);
+const AZURE_POLL_MS = Number(process.env.AZURE_POLL_MS || 1000);
 const AZURE_POLL_TIMEOUT_MS = Number(process.env.AZURE_POLL_TIMEOUT_MS || 30000);
-const AZURE_RETRY_MAX = Number(process.env.AZURE_RETRY_MAX || 5);
-const AZURE_RETRY_BASE_MS = Number(process.env.AZURE_RETRY_BASE_MS || 400);
-const AZURE_RETRY_JITTER_MS = Number(process.env.AZURE_RETRY_JITTER_MS || 250);
+const AZURE_POLL_MAX_ATTEMPTS = parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "60", 10);
 const AZURE_RETRY_MAX_MS = Number(process.env.AZURE_RETRY_MAX_MS || 60000);
+
+const MIN_IMAGE_PX = parseInt(process.env.MIN_IMAGE_PX || "0", 10);
 
 const PDF_PRESLICE = String(process.env.PDF_PRESLICE || "0") === "1";
 const PDF_SOFT_LIMIT = String(process.env.PDF_SOFT_LIMIT || "1") === "1";
@@ -91,12 +92,6 @@ function bytesFromBase64Strict(b64) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function backoffMs(attempt) {
-  const base = AZURE_RETRY_BASE_MS * Math.pow(2, attempt);
-  const jitter = Math.floor(Math.random() * AZURE_RETRY_JITTER_MS);
-  return base + jitter;
-}
 
 function coerceMaxPages(v) {
   const n = Number.parseInt(String(v), 10);
@@ -204,7 +199,7 @@ async function preslicePdfIfNeeded(pdfBytes, maxPages) {
   };
 }
 
-async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
+async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
   if (!AZURE_VISION_ENDPOINT || !AZURE_VISION_KEY) {
     throw Object.assign(new Error("Azure Vision endpoint/key missing"), { status: 500 });
   }
@@ -236,11 +231,18 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
 
   // Poll with bounded retries/backoff for transient 429/5xx, honor Retry-After
   const deadline = Date.now() + AZURE_POLL_TIMEOUT_MS;
+  const maxAttempts = Number.isFinite(AZURE_POLL_MAX_ATTEMPTS) && AZURE_POLL_MAX_ATTEMPTS > 0
+    ? AZURE_POLL_MAX_ATTEMPTS
+    : 60;
   let resultJson = null;
   let attempt = 0;
+  let delayMs = AZURE_POLL_MS;
 
-  while (Date.now() < deadline) {
-    await sleep(AZURE_POLL_MS);
+  while (attempt < maxAttempts && Date.now() < deadline) {
+    if (attempt > 0) {
+      await sleep(Math.max(0, delayMs ?? 0));
+    }
+    attempt++;
 
     try {
       const poll = await axios.get(
@@ -253,6 +255,11 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
       );
 
       const httpStatus = poll.status;
+      const retryAfterMs = parseRetryAfter(poll.headers["retry-after"]);
+      const boundedDelay = retryAfterMs !== null
+        ? clamp(retryAfterMs, AZURE_POLL_MS, AZURE_RETRY_MAX_MS)
+        : 1000;
+      delayMs = boundedDelay;
 
       // Handle non-200 responses
       if (httpStatus !== 200) {
@@ -265,20 +272,12 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
         }
 
         // Retry 429 and 5xx with Retry-After support
-        if ((httpStatus === 429 || httpStatus >= 500) && attempt < AZURE_RETRY_MAX) {
-          const retryAfterMs = parseRetryAfter(poll.headers['retry-after']);
-          let delay;
-          if (retryAfterMs !== null) {
-            delay = clamp(retryAfterMs, AZURE_POLL_MS, AZURE_RETRY_MAX_MS);
-          } else {
-            delay = backoffMs(attempt);
-          }
-          attempt++;
-          await sleep(delay);
+        if (httpStatus === 429 || httpStatus >= 500) {
+          delayMs = boundedDelay;
           continue;
         }
 
-        // Exceeded retries or other error
+        // Other errors
         const e = new Error(`Azure poll HTTP ${httpStatus}`);
         e.status = httpStatus || 502;
         e.detail = poll.data;
@@ -307,7 +306,22 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint }) {
     }
   }
 
-  if (!resultJson) throw Object.assign(new Error("Azure Read timeout"), { status: 408 });
+  if (!resultJson) {
+    if (attempt >= maxAttempts) {
+      if (LOG_LEVEL !== "silent") {
+        console.error(`Azure Read exceeded poll attempts`, { requestId, opId, attempts: attempt });
+      }
+      const e = new Error("Azure Read exceeded poll attempts");
+      e.status = 500;
+      e.meta = { attempts: attempt };
+      e.detail = { opId };
+      throw e;
+    }
+    const timeoutErr = new Error("Azure Read timeout");
+    timeoutErr.status = 408;
+    timeoutErr.detail = { opId };
+    throw timeoutErr;
+  }
 
   // normalize result
   const analyze = resultJson.analyzeResult || {};
@@ -357,6 +371,31 @@ app.post("/extract", async (req, res) => {
     const languageHint = Array.isArray(languages) ? languages[0]
                         : (typeof languages === "string" ? languages : undefined);
 
+    if (mime.startsWith("image/") && MIN_IMAGE_PX > 0) {
+      if (buf.length === 0) {
+        return bad(res, 400, "Image is empty or corrupt", { code: "image_too_small", minPixels: MIN_IMAGE_PX });
+      }
+      let dims;
+      try {
+        dims = imageSize(buf);
+      } catch {
+        return bad(res, 400, "Unable to determine image dimensions", { code: "image_inspection_failed" });
+      }
+      const width = Number(dims?.width ?? 0);
+      const height = Number(dims?.height ?? 0);
+      if (!width || !height) {
+        return bad(res, 400, "Image dimensions missing", { code: "image_inspection_failed" });
+      }
+      if (width < MIN_IMAGE_PX || height < MIN_IMAGE_PX) {
+        return bad(res, 400, `Image too small; minimum is ${MIN_IMAGE_PX}px`, {
+          code: "image_too_small",
+          width,
+          height,
+          minPixels: MIN_IMAGE_PX
+        });
+      }
+    }
+
     if (mime.startsWith("image/")) {
       const out = await ocrWithOpenAI({ mime, data: buf });
       return res.json({ ...out, requestId });
@@ -382,7 +421,7 @@ app.post("/extract", async (req, res) => {
         }
       }
 
-      const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint });
+      const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint, requestId });
       return res.json({ ...out, requestId });
     } else {
       return bad(res, 415, `Unsupported mime: ${mime}`, { code: "unsupported_mime" });
@@ -392,7 +431,16 @@ app.post("/extract", async (req, res) => {
     if (LOG_LEVEL !== "silent") {
       console.error(`[${requestId}] OCR error`, { code, message: err.message });
     }
-    return res.status(code).json({ error: { code: String(code), httpStatus: code, message: "OCR failed", requestId } });
+    const errorPayload = {
+      code: String(code),
+      httpStatus: code,
+      message: "OCR failed",
+      requestId
+    };
+    if (err.meta && typeof err.meta === "object" && err.meta !== null) {
+      errorPayload.meta = err.meta;
+    }
+    return res.status(code).json({ error: errorPayload });
   }
 });
 
