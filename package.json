@@ -22,7 +22,7 @@
     "smoke:public": "bash scripts/smoke-public.sh"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.20.0",
+    "@modelcontextprotocol/sdk": "1.20.1",
     "axios": "^1.12.2",
     "cors": "2.8.5",
     "dotenv": "17.2.3",
@@ -31,7 +31,7 @@
     "he": "^1.2.0",
     "jszip": "^3.10.1",
     "mammoth": "^1.11.0",
-    "pdf-parse": "^2.3.7",
+    "pdf-parse": "^2.4.4",
     "sanitize-html": "^2.17.0",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.0"

@@ -1,10 +1,19 @@
 import express from "express";
 import crypto from "crypto";
-import morgan from "morgan";
 import axios from "axios";
 import OpenAI from "openai";
 import { PDFDocument } from "pdf-lib";
 import imageSize from "image-size";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+let requestLogger = (_req, _res, next) => next();
+try {
+  const morgan = require("morgan");
+  requestLogger = morgan("tiny");
+} catch {
+  // Morgan is optional in CI/tests; fallback to no-op logger.
+}
 
 // ---- env & defaults ----
 const PORT = process.env.PORT || 8080;
@@ -79,7 +88,7 @@ app.use(express.json({
 }));
 
 // minimal logging (never log base64 or OCR text)
-app.use(morgan("tiny"));
+app.use(requestLogger);
 
 // health
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
@@ -145,6 +154,38 @@ function parseRetryAfter(h) {
   const when = Date.parse(s);
   if (Number.isFinite(when)) return Math.max(0, when - Date.now());
   return null;
+}
+
+function getAzureConfig() {
+  const endpoint = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
+  const key = process.env.AZURE_VISION_KEY;
+  const apiVersion = process.env.AZURE_VISION_API_VERSION || "v3.2";
+
+  const postTimeoutMsRaw = Number(process.env.AZURE_POST_TIMEOUT_MS);
+  const postTimeoutMs = Number.isFinite(postTimeoutMsRaw) && postTimeoutMsRaw > 0 ? postTimeoutMsRaw : 15000;
+
+  const pollMsRaw = Number(process.env.AZURE_POLL_MS);
+  const pollMs = Number.isFinite(pollMsRaw) && pollMsRaw > 0 ? pollMsRaw : 1000;
+
+  const pollTimeoutRaw = Number(process.env.AZURE_POLL_TIMEOUT_MS);
+  const pollTimeoutMs = Number.isFinite(pollTimeoutRaw) && pollTimeoutRaw > 0 ? pollTimeoutRaw : 30000;
+
+  const pollMaxAttemptsRaw = Number.parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "30", 10);
+  const pollMaxAttempts = Number.isFinite(pollMaxAttemptsRaw) && pollMaxAttemptsRaw > 0 ? pollMaxAttemptsRaw : 30;
+
+  const retryMaxMsRaw = Number(process.env.AZURE_RETRY_MAX_MS);
+  const retryMaxMs = Number.isFinite(retryMaxMsRaw) && retryMaxMsRaw > 0 ? retryMaxMsRaw : 60000;
+
+  return {
+    endpoint,
+    key,
+    apiVersion,
+    postTimeoutMs,
+    pollMs,
+    pollTimeoutMs,
+    pollMaxAttempts,
+    retryMaxMs
+  };
 }
 
 function clamp(n, lo, hi) {
@@ -392,7 +433,6 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
 
       // Handle non-200 responses
       if (httpStatus !== 200) {
-        // Fail fast for 4xx (except 429) and other non-retryable statuses
         if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429) {
           const e = new Error(`Azure poll HTTP ${httpStatus}`);
           e.status = httpStatus;
@@ -433,8 +473,20 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
         e.detail = String(err instanceof Error ? err.message : err);
         throw e;
       }
-      // Re-throw errors we've already handled above
-      throw err;
+
+      if (err?.response) {
+        const e = new Error("Azure Read network error");
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = { upstreamStatus: err.response.status, body: err.response.data };
+        throw e;
+      }
+
+      const e = new Error("Azure Read network error");
+      e.status = 502;
+      e.code = "azure_failed";
+      e.detail = String(err instanceof Error ? err.message : err);
+      throw e;
     }
   }
 
