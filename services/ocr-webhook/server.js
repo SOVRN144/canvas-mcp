@@ -19,18 +19,65 @@ try {
 const PORT = process.env.PORT || 8080;
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o";
-const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
-
 const MIN_IMAGE_PX = parseInt(process.env.MIN_IMAGE_PX || "0", 10);
-
-const PDF_PRESLICE = String(process.env.PDF_PRESLICE || "0") === "1";
-const PDF_SOFT_LIMIT = String(process.env.PDF_SOFT_LIMIT || "1") === "1";
-
 const OCR_WEBHOOK_SECRET = process.env.OCR_WEBHOOK_SECRET || ""; // if set, requests must be HMAC-signed
 const OCR_MAX_BYTES = Number(process.env.OCR_MAX_BYTES || 15_000_000); // 15 MB default
 const OCR_MAX_PAGES = Number(process.env.OCR_MAX_PAGES || 25);
+
+function isTruthy(v) {
+  if (v == null) return false;
+  const s = String(v).trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
+function parsePositiveInt(v, fallback) {
+  const n = Number.parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parsePositiveNumber(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function normalizeAzureEndpoint(raw) {
+  if (!raw) return "";
+  return String(raw).replace(/\/+$/, "");
+}
+
+function getAzureConfig() {
+  const endpoint = normalizeAzureEndpoint(process.env.AZURE_VISION_ENDPOINT);
+  const key = process.env.AZURE_VISION_KEY;
+  const apiVersion = process.env.AZURE_VISION_API_VERSION || "v3.2";
+  const postTimeoutMs = parsePositiveNumber(process.env.AZURE_POST_TIMEOUT_MS, 15000);
+  const pollMs = parsePositiveNumber(process.env.AZURE_POLL_MS, 1000);
+  const pollTimeoutMs = parsePositiveNumber(process.env.AZURE_POLL_TIMEOUT_MS, 30000);
+  const pollMaxAttempts = parsePositiveInt(process.env.AZURE_POLL_MAX_ATTEMPTS, 30);
+  const retryMaxMs = parsePositiveNumber(process.env.AZURE_RETRY_MAX_MS, 60000);
+  const pollMinTimeoutMs = parsePositiveNumber(process.env.AZURE_POLL_MIN_TIMEOUT_MS, 2000);
+  return { endpoint, key, apiVersion, postTimeoutMs, pollMs, pollTimeoutMs, pollMaxAttempts, retryMaxMs, pollMinTimeoutMs };
+}
+
+function getOpenAIConfig() {
+  const apiKey = (process.env.OPENAI_API_KEY || "").trim();
+  const model = (process.env.OPENAI_VISION_MODEL || "gpt-4o").trim() || "gpt-4o";
+  const timeoutMs = parsePositiveNumber(process.env.OPENAI_TIMEOUT_MS, 60000);
+  return { apiKey, model, timeoutMs };
+}
+
+function getOpenAIEnabled() {
+  return Boolean(getOpenAIConfig().apiKey);
+}
+
+function getPdfPresliceEnabled() {
+  const raw = process.env.PDF_PRESLICE;
+  return raw == null ? false : isTruthy(raw);
+}
+
+function getPdfSoftLimitEnabled() {
+  const raw = process.env.PDF_SOFT_LIMIT;
+  return raw == null ? true : isTruthy(raw);
+}
 
 const app = express();
 app.disable("x-powered-by");
@@ -49,13 +96,13 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 // readiness (presence booleans only — no secret values)
 app.get("/ready", (_req, res) => {
-  const { endpoint, key } = getAzureConfig();
+  const azure = getAzureConfig();
   res.json({
     ok: true,
-    openai: Boolean(OPENAI_API_KEY),
-    azure: Boolean(endpoint && key),
+    openai: getOpenAIEnabled(),
+    azure: Boolean(azure.endpoint && azure.key),
     hmac: Boolean(OCR_WEBHOOK_SECRET),
-    pdfPreslice: PDF_PRESLICE
+    pdfPreslice: getPdfPresliceEnabled()
   });
 });
 
@@ -110,38 +157,6 @@ function parseRetryAfter(h) {
   return null;
 }
 
-function getAzureConfig() {
-  const endpoint = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
-  const key = process.env.AZURE_VISION_KEY;
-  const apiVersion = process.env.AZURE_VISION_API_VERSION || "v3.2";
-
-  const postTimeoutMsRaw = Number(process.env.AZURE_POST_TIMEOUT_MS);
-  const postTimeoutMs = Number.isFinite(postTimeoutMsRaw) && postTimeoutMsRaw > 0 ? postTimeoutMsRaw : 15000;
-
-  const pollMsRaw = Number(process.env.AZURE_POLL_MS);
-  const pollMs = Number.isFinite(pollMsRaw) && pollMsRaw > 0 ? pollMsRaw : 1000;
-
-  const pollTimeoutRaw = Number(process.env.AZURE_POLL_TIMEOUT_MS);
-  const pollTimeoutMs = Number.isFinite(pollTimeoutRaw) && pollTimeoutRaw > 0 ? pollTimeoutRaw : 30000;
-
-  const pollMaxAttemptsRaw = Number.parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "30", 10);
-  const pollMaxAttempts = Number.isFinite(pollMaxAttemptsRaw) && pollMaxAttemptsRaw > 0 ? pollMaxAttemptsRaw : 30;
-
-  const retryMaxMsRaw = Number(process.env.AZURE_RETRY_MAX_MS);
-  const retryMaxMs = Number.isFinite(retryMaxMsRaw) && retryMaxMsRaw > 0 ? retryMaxMsRaw : 60000;
-
-  return {
-    endpoint,
-    key,
-    apiVersion,
-    postTimeoutMs,
-    pollMs,
-    pollTimeoutMs,
-    pollMaxAttempts,
-    retryMaxMs
-  };
-}
-
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -163,15 +178,32 @@ async function withTimeout(promise, ms, onTimeoutMsg = "Request timed out") {
   }
 }
 
-async function countPdfPages(pdfBytes) {
+async function countPdfPages(pdfData) {
   // Minimal parse just to read page count; throws if encrypted/invalid
-  const doc = await PDFDocument.load(pdfBytes);
+  let bytes;
+  if (Buffer.isBuffer(pdfData)) {
+    bytes = pdfData;
+  } else if (typeof pdfData === "string") {
+    try {
+      bytes = Buffer.from(pdfData, "base64");
+    } catch {
+      bytes = Buffer.from(pdfData);
+    }
+  } else if (pdfData instanceof Uint8Array) {
+    bytes = Buffer.from(pdfData);
+  } else {
+    throw new TypeError("countPdfPages expects a Buffer, base64 string, or Uint8Array");
+  }
+  const doc = await PDFDocument.load(bytes);
   return doc.getPageCount();
 }
 
-async function ocrWithOpenAI({ mime, data }) {
-  if (!OPENAI_API_KEY) throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 500 });
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+async function ocrWithOpenAI({ mime, data, client }) {
+  const { apiKey, model, timeoutMs } = getOpenAIConfig();
+  if (!apiKey) {
+    throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 501, code: "openai_missing" });
+  }
+  const clientInstance = client ?? new OpenAI({ apiKey });
   const started = Date.now();
 
   // Build data URL for Responses API
@@ -179,9 +211,9 @@ async function ocrWithOpenAI({ mime, data }) {
 
   // Use withTimeout helper so we return 504 on timeouts (as documented)
   const run = async (signal) => {
-    const resp = await client.responses.create(
+    const resp = await clientInstance.responses.create(
       {
-        model: OPENAI_VISION_MODEL, // default set above; keep override support
+        model,
         temperature: 0,
         input: [
           {
@@ -204,12 +236,12 @@ async function ocrWithOpenAI({ mime, data }) {
     };
   };
 
-  return await withTimeout(run, OPENAI_TIMEOUT_MS, "OpenAI OCR timed out");
+  return await withTimeout(run, timeoutMs, "OpenAI OCR timed out");
 }
 
 // ---- optional PDF pre-slicing to enforce maxPages & reduce cost ----
-async function preslicePdfIfNeeded(pdfBytes, maxPages) {
-  if (!PDF_PRESLICE) {
+async function preslicePdfIfNeeded(pdfBytes, maxPages, { enabled = getPdfPresliceEnabled() } = {}) {
+  if (!enabled) {
     return { bytes: pdfBytes, originalPages: undefined, submittedPages: undefined, presliced: false };
   }
   const src = await PDFDocument.load(pdfBytes);
@@ -232,6 +264,77 @@ async function preslicePdfIfNeeded(pdfBytes, maxPages) {
   };
 }
 
+async function ocrWithOpenAiPreslice({ data, maxPages }) {
+  const { apiKey } = getOpenAIConfig();
+  if (!apiKey) {
+    throw Object.assign(new Error("OpenAI not configured"), { status: 501, code: "openai_missing" });
+  }
+  let preslice;
+  try {
+    ({ preslicePdfToPngBuffers: preslice } = await import("./preslice.js"));
+  } catch (err) {
+    const e = new Error("PDF preslicer unavailable");
+    e.status = 501;
+    e.code = "openai_preslice_unavailable";
+    e.detail = String(err?.message ?? err);
+    throw e;
+  }
+
+  const started = Date.now();
+  const totalPages = await countPdfPages(data).catch(() => undefined);
+  const pngBuffers = await preslice(data, { maxPages });
+
+  if (!Array.isArray(pngBuffers) || pngBuffers.length === 0) {
+    const e = new Error("No PDF pages rendered for OpenAI preslice");
+    e.status = 422;
+    e.code = "preslice_empty";
+    throw e;
+  }
+
+  const client = new OpenAI({ apiKey });
+  const concurrency = Math.min(3, pngBuffers.length);
+  const outTexts = new Array(pngBuffers.length);
+  const outPages = new Array(pngBuffers.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (true) {
+      const current = nextIndex++;
+      if (current >= pngBuffers.length) break;
+      const png = pngBuffers[current];
+      const result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      outTexts[current] = result.text || "";
+      outPages[current] = current + 1;
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const pagesOcred = outPages.filter(Boolean);
+  const combinedText = outTexts.filter(t => typeof t === "string").join("\n\n").trim();
+  const submittedPages = pagesOcred.length;
+  const originalPages = typeof totalPages === "number" ? totalPages : submittedPages;
+  const preslicedFlag =
+    typeof totalPages === "number"
+      ? (totalPages > submittedPages)
+      : (submittedPages >= maxPages);
+
+  return {
+    text: combinedText,
+    pagesOcred,
+    meta: {
+      engine: "openai-vision",
+      durationMs: Date.now() - started,
+      source: "ocr",
+      pdf: {
+        originalPages,
+        submittedPages,
+        presliced: preslicedFlag
+      }
+    }
+  };
+}
+
 async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
   const {
     endpoint,
@@ -241,7 +344,8 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
     pollMs,
     pollTimeoutMs,
     pollMaxAttempts,
-    retryMaxMs
+    retryMaxMs,
+    pollMinTimeoutMs
   } = getAzureConfig();
 
   if (!endpoint || !key) {
@@ -250,7 +354,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
   const started = Date.now();
 
   // Pre-slice (optional)
-  const slice = await preslicePdfIfNeeded(data, maxPages);
+  const slice = await preslicePdfIfNeeded(data, maxPages, { enabled: getPdfPresliceEnabled() });
   const toSend = slice.bytes;
 
   // Build submit URL with optional language hint; default to readingOrder=natural
@@ -272,14 +376,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       signal: globalThis.AbortSignal?.timeout?.(postTimeoutMs)
     });
   } catch (err) {
-    const known = new Set(["azure_failed", "azure_timeout"]);
-    const statusIsNumber = typeof err?.status === "number";
-    const codeIsKnown = err && typeof err === "object" && known.has(err.code);
-    if (statusIsNumber || codeIsKnown) {
-      throw err;
-    }
-
-    if (err && typeof err === "object" && "response" in err && err.response) {
+    if (err?.response) {
       const status = err.response?.status ?? 502;
       const submitError = new Error(`Azure submit HTTP ${status}`);
       submitError.status = 502;
@@ -308,7 +405,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
 
   // Poll with bounded retries/backoff for transient 429/5xx, honor Retry-After
   const deadline = Date.now() + pollTimeoutMs;
-  const maxAttempts = pollMaxAttempts;
+  const maxAttempts = Number.isFinite(pollMaxAttempts) && pollMaxAttempts > 0 ? pollMaxAttempts : 60;
   let resultJson = null;
   let attempt = 0;
   let delayMs = pollMs;
@@ -324,7 +421,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
         `${endpoint}/vision/${apiVersion}/read/analyzeResults/${opId}`,
         {
           headers: { "Ocp-Apim-Subscription-Key": key },
-          timeout: clamp(Math.max(500, pollMs * 5), 500, pollTimeoutMs),
+          timeout: Math.max(pollMinTimeoutMs, pollMs),
           validateStatus: () => true
         }
       );
@@ -340,21 +437,19 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       if (httpStatus !== 200) {
         if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429) {
           const e = new Error(`Azure poll HTTP ${httpStatus}`);
-          e.status = 502;
+          e.status = httpStatus;
           e.code = "azure_failed";
-          e.detail = { upstreamStatus: httpStatus, body: poll.data };
+          e.detail = poll.data;
           throw e;
         }
 
-        if (httpStatus === 429 || httpStatus >= 500) {
-          delayMs = boundedDelay;
-          continue;
-        }
+        // Retry 429 and 5xx with Retry-After support
+        if (httpStatus === 429 || httpStatus >= 500) continue;
 
         const e = new Error(`Azure poll HTTP ${httpStatus}`);
-        e.status = 502;
+        e.status = httpStatus || 502;
         e.code = "azure_failed";
-        e.detail = { upstreamStatus: httpStatus, body: poll.data };
+        e.detail = poll.data;
         throw e;
       }
 
@@ -362,39 +457,22 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       const st = poll.data?.status;
       if (st === "succeeded") { resultJson = poll.data; break; }
       if (st === "failed") {
-        const detailMessage =
-          poll.data?.error?.message ??
-          poll.data?.analyzeResult?.errors?.[0]?.message ??
-          "unknown";
-        const azureError = new Error(`Azure Read failed: ${detailMessage}`);
-        azureError.status = 502;
-        azureError.code = "azure_failed";
-        azureError.detail = poll.data;
-        throw azureError;
+        const e = new Error("Azure Read failed");
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = poll.data;
+        throw e;
       }
       // notStarted/running → continue polling
       continue;
 
     } catch (err) {
-      const known = new Set(["azure_failed", "azure_timeout"]);
-      const statusIsNumber = typeof err?.status === "number";
-      const codeIsKnown = err && typeof err === "object" && known.has(err.code);
-      if (statusIsNumber || codeIsKnown) {
-        throw err;
-      }
-
-      if (err?.response) {
-        const e = new Error("Azure Read network error");
-        e.status = 502;
-        e.code = "azure_failed";
-        e.detail = { upstreamStatus: err.response.status, body: err.response.data };
-        throw e;
-      }
-
       const e = new Error("Azure Read network error");
       e.status = 502;
       e.code = "azure_failed";
-      e.detail = String(err instanceof Error ? err.message : err);
+      e.detail = err?.response
+        ? { upstreamStatus: err.response.status, body: err.response.data }
+        : String(err instanceof Error ? err.message : err);
       throw e;
     }
   }
@@ -404,14 +482,14 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       if (LOG_LEVEL !== "silent") {
         console.error(`Azure Read exceeded poll attempts`, { requestId, opId, attempts: attempt });
       }
-      const e = new Error(`Azure Read timed out after ${attempt} polls`);
+      const e = new Error("Azure Read exceeded poll attempts");
       e.status = 504;
       e.code = "azure_timeout";
       e.meta = { attempts: attempt };
       e.detail = { opId };
       throw e;
     }
-    const timeoutErr = new Error("Azure Read timed out before completion");
+    const timeoutErr = new Error("Azure Read timeout");
     timeoutErr.status = 504;
     timeoutErr.code = "azure_timeout";
     timeoutErr.detail = { opId };
@@ -496,8 +574,13 @@ app.post("/extract", async (req, res) => {
       return res.json({ ...out, requestId });
     } else if (mime === "application/pdf") {
       const effMaxPages = coerceMaxPages(maxPages);
+      const wantsPreslice = getPdfPresliceEnabled();
+      const softLimitEnabled = getPdfSoftLimitEnabled();
+      const azure = getAzureConfig();
+      const hasAzure = Boolean(azure.endpoint && azure.key);
+      const hasOpenAI = getOpenAIEnabled();
 
-      if (!PDF_PRESLICE && PDF_SOFT_LIMIT) {
+      if (!wantsPreslice && softLimitEnabled) {
         try {
           const pages = await countPdfPages(buf);
           if (pages > effMaxPages) {
@@ -516,24 +599,66 @@ app.post("/extract", async (req, res) => {
         }
       }
 
-      const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint, requestId });
-      return res.json({ ...out, requestId });
+      const logDecision = (engine, reason) => {
+        if (LOG_LEVEL === "silent") return;
+        console.info(JSON.stringify({
+          level: "info",
+          message: "PDF engine decision",
+          requestId,
+          engine,
+          reason,
+          hasAzure,
+          hasOpenAI,
+          wantsPreslice
+        }));
+      };
+
+      if (wantsPreslice && hasOpenAI) {
+        logDecision("openai-vision", "pdf_preslice_enabled");
+        const out = await ocrWithOpenAiPreslice({ data: buf, maxPages: effMaxPages });
+        return res.json({ ...out, requestId });
+      }
+
+      if (hasAzure) {
+        logDecision("azure-read", wantsPreslice ? "azure_available_preslice_disabled" : "azure_available");
+        const out = await ocrWithAzurePdf({ data: buf, maxPages: effMaxPages, languageHint, requestId });
+        return res.json({ ...out, requestId });
+      }
+
+      if (hasOpenAI) {
+        logDecision("openai-vision", "fallback_openai");
+        const out = await ocrWithOpenAiPreslice({ data: buf, maxPages: effMaxPages });
+        return res.json({ ...out, requestId });
+      }
+
+      const noEngine = new Error("No OCR engine configured");
+      noEngine.status = 501;
+      noEngine.code = "no_ocr_engine";
+      throw noEngine;
     } else {
       return bad(res, 415, `Unsupported mime: ${mime}`, { code: "unsupported_mime" });
     }
   } catch (err) {
-    const status = err?.status ?? err?.statusCode ?? 500;
+    const status = err?.status || err?.statusCode || 500;
     if (LOG_LEVEL !== "silent") {
-      console.error(`[${requestId}] OCR error`, { status, code: err?.code, message: err?.message });
+      console.error(`[${requestId}] OCR error`, {
+        status,
+        code: err?.code,
+        message: err?.message
+      });
     }
+    const message = (typeof err?.message === "string" && err.message) ? err.message : "OCR failed";
     const errorPayload = {
       code: typeof err?.code === "string" ? err.code : String(status),
       httpStatus: status,
-      message: "OCR failed",
+      message,
       requestId
     };
     if (err.meta && typeof err.meta === "object" && err.meta !== null) {
       errorPayload.meta = err.meta;
+    }
+    if (err?.detail && (typeof err.detail === "string" || (typeof err.detail === "object" && err.detail !== null))) {
+      errorPayload.detail = err.detail;
     }
     return res.status(status).json({ error: errorPayload });
   }
