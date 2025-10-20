@@ -54,7 +54,8 @@ function getAzureConfig() {
   const pollTimeoutMs = parsePositiveNumber(process.env.AZURE_POLL_TIMEOUT_MS, 30000);
   const pollMaxAttempts = parsePositiveInt(process.env.AZURE_POLL_MAX_ATTEMPTS, 30);
   const retryMaxMs = parsePositiveNumber(process.env.AZURE_RETRY_MAX_MS, 60000);
-  return { endpoint, key, apiVersion, postTimeoutMs, pollMs, pollTimeoutMs, pollMaxAttempts, retryMaxMs };
+  const pollMinTimeoutMs = parsePositiveNumber(process.env.AZURE_POLL_MIN_TIMEOUT_MS, 2000);
+  return { endpoint, key, apiVersion, postTimeoutMs, pollMs, pollTimeoutMs, pollMaxAttempts, retryMaxMs, pollMinTimeoutMs };
 }
 
 function getOpenAIConfig() {
@@ -343,7 +344,8 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
     pollMs,
     pollTimeoutMs,
     pollMaxAttempts,
-    retryMaxMs
+    retryMaxMs,
+    pollMinTimeoutMs
   } = getAzureConfig();
 
   if (!endpoint || !key) {
@@ -419,7 +421,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
         `${endpoint}/vision/${apiVersion}/read/analyzeResults/${opId}`,
         {
           headers: { "Ocp-Apim-Subscription-Key": key },
-          timeout: Math.max(2000, pollMs),
+          timeout: Math.max(pollMinTimeoutMs, pollMs),
           validateStatus: () => true
         }
       );
