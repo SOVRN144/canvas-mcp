@@ -669,7 +669,7 @@ app.post("/extract", async (req, res) => {
     if (err.meta && typeof err.meta === "object" && err.meta !== null) {
       errorPayload.meta = err.meta;
     }
-    if (err?.detail && typeof err.detail === "object" && err.detail !== null) {
+    if (err?.detail && (typeof err.detail === "string" || (typeof err.detail === "object" && err.detail !== null))) {
       errorPayload.detail = err.detail;
     }
     return res.status(status).json({ error: errorPayload });
