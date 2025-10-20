@@ -52,7 +52,7 @@ function getAzureConfig() {
   const postTimeoutMs = parsePositiveNumber(process.env.AZURE_POST_TIMEOUT_MS, 15000);
   const pollMs = parsePositiveNumber(process.env.AZURE_POLL_MS, 1000);
   const pollTimeoutMs = parsePositiveNumber(process.env.AZURE_POLL_TIMEOUT_MS, 30000);
-  const pollMaxAttempts = parsePositiveInt(process.env.AZURE_POLL_MAX_ATTEMPTS, 60);
+  const pollMaxAttempts = parsePositiveInt(process.env.AZURE_POLL_MAX_ATTEMPTS, 30);
   const retryMaxMs = parsePositiveNumber(process.env.AZURE_RETRY_MAX_MS, 60000);
   return { endpoint, key, apiVersion, postTimeoutMs, pollMs, pollTimeoutMs, pollMaxAttempts, retryMaxMs };
 }
@@ -156,38 +156,6 @@ function parseRetryAfter(h) {
   return null;
 }
 
-function getAzureConfig() {
-  const endpoint = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
-  const key = process.env.AZURE_VISION_KEY;
-  const apiVersion = process.env.AZURE_VISION_API_VERSION || "v3.2";
-
-  const postTimeoutMsRaw = Number(process.env.AZURE_POST_TIMEOUT_MS);
-  const postTimeoutMs = Number.isFinite(postTimeoutMsRaw) && postTimeoutMsRaw > 0 ? postTimeoutMsRaw : 15000;
-
-  const pollMsRaw = Number(process.env.AZURE_POLL_MS);
-  const pollMs = Number.isFinite(pollMsRaw) && pollMsRaw > 0 ? pollMsRaw : 1000;
-
-  const pollTimeoutRaw = Number(process.env.AZURE_POLL_TIMEOUT_MS);
-  const pollTimeoutMs = Number.isFinite(pollTimeoutRaw) && pollTimeoutRaw > 0 ? pollTimeoutRaw : 30000;
-
-  const pollMaxAttemptsRaw = Number.parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "30", 10);
-  const pollMaxAttempts = Number.isFinite(pollMaxAttemptsRaw) && pollMaxAttemptsRaw > 0 ? pollMaxAttemptsRaw : 30;
-
-  const retryMaxMsRaw = Number(process.env.AZURE_RETRY_MAX_MS);
-  const retryMaxMs = Number.isFinite(retryMaxMsRaw) && retryMaxMsRaw > 0 ? retryMaxMsRaw : 60000;
-
-  return {
-    endpoint,
-    key,
-    apiVersion,
-    postTimeoutMs,
-    pollMs,
-    pollTimeoutMs,
-    pollMaxAttempts,
-    retryMaxMs
-  };
-}
-
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -209,16 +177,30 @@ async function withTimeout(promise, ms, onTimeoutMsg = "Request timed out") {
   }
 }
 
-async function countPdfPages(pdfBytes) {
+async function countPdfPages(pdfData) {
   // Minimal parse just to read page count; throws if encrypted/invalid
-  const doc = await PDFDocument.load(pdfBytes);
+  let bytes;
+  if (Buffer.isBuffer(pdfData)) {
+    bytes = pdfData;
+  } else if (typeof pdfData === "string") {
+    try {
+      bytes = Buffer.from(pdfData, "base64");
+    } catch {
+      bytes = Buffer.from(pdfData);
+    }
+  } else if (pdfData instanceof Uint8Array) {
+    bytes = Buffer.from(pdfData);
+  } else {
+    throw new TypeError("countPdfPages expects a Buffer, base64 string, or Uint8Array");
+  }
+  const doc = await PDFDocument.load(bytes);
   return doc.getPageCount();
 }
 
 async function ocrWithOpenAI({ mime, data, client }) {
   const { apiKey, model, timeoutMs } = getOpenAIConfig();
   if (!apiKey) {
-    throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 500, code: "openai_missing" });
+    throw Object.assign(new Error("OPENAI_API_KEY missing"), { status: 501, code: "openai_missing" });
   }
   const clientInstance = client ?? new OpenAI({ apiKey });
   const started = Date.now();
@@ -298,6 +280,7 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
   }
 
   const started = Date.now();
+  const totalPages = await countPdfPages(data).catch(() => undefined);
   const pngBuffers = await preslice(data, { maxPages });
 
   if (!Array.isArray(pngBuffers) || pngBuffers.length === 0) {
@@ -308,27 +291,43 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
   }
 
   const client = new OpenAI({ apiKey });
-  const texts = [];
-  const pagesOcred = [];
+  const concurrency = Math.min(3, pngBuffers.length);
+  const outTexts = new Array(pngBuffers.length);
+  const outPages = new Array(pngBuffers.length);
+  let nextIndex = 0;
 
-  for (let i = 0; i < pngBuffers.length; i++) {
-    const png = pngBuffers[i];
-    const out = await ocrWithOpenAI({ mime: "image/png", data: png, client });
-    texts.push(out.text || "");
-    pagesOcred.push(i + 1);
-  }
+  const worker = async () => {
+    while (true) {
+      const current = nextIndex++;
+      if (current >= pngBuffers.length) break;
+      const png = pngBuffers[current];
+      const result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      outTexts[current] = result.text || "";
+      outPages[current] = current + 1;
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const pagesOcred = outPages.filter(Boolean);
+  const combinedText = outTexts.filter(t => typeof t === "string").join("\n\n").trim();
+  const submittedPages = pagesOcred.length;
+  const originalPages = typeof totalPages === "number" ? totalPages : submittedPages;
+  const preslicedFlag = typeof totalPages === "number"
+    ? (totalPages > submittedPages)
+    : (submittedPages > 0);
 
   return {
-    text: texts.join("\n\n").trim(),
+    text: combinedText,
     pagesOcred,
     meta: {
       engine: "openai-vision",
       durationMs: Date.now() - started,
       source: "ocr",
       pdf: {
-        presliced: true,
-        originalPages: pagesOcred.length,
-        submittedPages: pagesOcred.length
+        originalPages,
+        submittedPages,
+        presliced: preslicedFlag
       }
     }
   };
@@ -660,14 +659,18 @@ app.post("/extract", async (req, res) => {
         message: err?.message
       });
     }
+    const message = (typeof err?.message === "string" && err.message) ? err.message : "OCR failed";
     const errorPayload = {
       code: typeof err?.code === "string" ? err.code : String(status),
       httpStatus: status,
-      message: "OCR failed",
+      message,
       requestId
     };
     if (err.meta && typeof err.meta === "object" && err.meta !== null) {
       errorPayload.meta = err.meta;
+    }
+    if (err?.detail && typeof err.detail === "object" && err.detail !== null) {
+      errorPayload.detail = err.detail;
     }
     return res.status(status).json({ error: errorPayload });
   }
