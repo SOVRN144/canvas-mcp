@@ -1,10 +1,19 @@
 import express from "express";
 import crypto from "crypto";
-import morgan from "morgan";
 import axios from "axios";
 import OpenAI from "openai";
 import { PDFDocument } from "pdf-lib";
 import imageSize from "image-size";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+let requestLogger = (_req, _res, next) => next();
+try {
+  const morgan = require("morgan");
+  requestLogger = morgan("tiny");
+} catch {
+  // Morgan is optional in CI/tests; fallback to no-op logger.
+}
 
 // ---- env & defaults ----
 const PORT = process.env.PORT || 8080;
@@ -13,15 +22,6 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o";
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
-
-const AZURE_VISION_ENDPOINT = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
-const AZURE_VISION_KEY = process.env.AZURE_VISION_KEY;
-const AZURE_VISION_API_VERSION = process.env.AZURE_VISION_API_VERSION || "v3.2";
-const AZURE_POST_TIMEOUT_MS = Number(process.env.AZURE_POST_TIMEOUT_MS || 15000);
-const AZURE_POLL_MS = Number(process.env.AZURE_POLL_MS || 1000);
-const AZURE_POLL_TIMEOUT_MS = Number(process.env.AZURE_POLL_TIMEOUT_MS || 30000);
-const AZURE_POLL_MAX_ATTEMPTS = parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "60", 10);
-const AZURE_RETRY_MAX_MS = Number(process.env.AZURE_RETRY_MAX_MS || 60000);
 
 const MIN_IMAGE_PX = parseInt(process.env.MIN_IMAGE_PX || "0", 10);
 
@@ -42,17 +42,18 @@ app.use(express.json({
 }));
 
 // minimal logging (never log base64 or OCR text)
-app.use(morgan("tiny"));
+app.use(requestLogger);
 
 // health
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 // readiness (presence booleans only — no secret values)
 app.get("/ready", (_req, res) => {
+  const { endpoint, key } = getAzureConfig();
   res.json({
     ok: true,
     openai: Boolean(OPENAI_API_KEY),
-    azure: Boolean(AZURE_VISION_ENDPOINT && AZURE_VISION_KEY),
+    azure: Boolean(endpoint && key),
     hmac: Boolean(OCR_WEBHOOK_SECRET),
     pdfPreslice: PDF_PRESLICE
   });
@@ -107,6 +108,38 @@ function parseRetryAfter(h) {
   const when = Date.parse(s);
   if (Number.isFinite(when)) return Math.max(0, when - Date.now());
   return null;
+}
+
+function getAzureConfig() {
+  const endpoint = (process.env.AZURE_VISION_ENDPOINT || "").replace(/\/+$/, "");
+  const key = process.env.AZURE_VISION_KEY;
+  const apiVersion = process.env.AZURE_VISION_API_VERSION || "v3.2";
+
+  const postTimeoutMsRaw = Number(process.env.AZURE_POST_TIMEOUT_MS);
+  const postTimeoutMs = Number.isFinite(postTimeoutMsRaw) && postTimeoutMsRaw > 0 ? postTimeoutMsRaw : 15000;
+
+  const pollMsRaw = Number(process.env.AZURE_POLL_MS);
+  const pollMs = Number.isFinite(pollMsRaw) && pollMsRaw > 0 ? pollMsRaw : 1000;
+
+  const pollTimeoutRaw = Number(process.env.AZURE_POLL_TIMEOUT_MS);
+  const pollTimeoutMs = Number.isFinite(pollTimeoutRaw) && pollTimeoutRaw > 0 ? pollTimeoutRaw : 30000;
+
+  const pollMaxAttemptsRaw = Number.parseInt(process.env.AZURE_POLL_MAX_ATTEMPTS || "30", 10);
+  const pollMaxAttempts = Number.isFinite(pollMaxAttemptsRaw) && pollMaxAttemptsRaw > 0 ? pollMaxAttemptsRaw : 30;
+
+  const retryMaxMsRaw = Number(process.env.AZURE_RETRY_MAX_MS);
+  const retryMaxMs = Number.isFinite(retryMaxMsRaw) && retryMaxMsRaw > 0 ? retryMaxMsRaw : 60000;
+
+  return {
+    endpoint,
+    key,
+    apiVersion,
+    postTimeoutMs,
+    pollMs,
+    pollTimeoutMs,
+    pollMaxAttempts,
+    retryMaxMs
+  };
 }
 
 function clamp(n, lo, hi) {
@@ -200,7 +233,18 @@ async function preslicePdfIfNeeded(pdfBytes, maxPages) {
 }
 
 async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
-  if (!AZURE_VISION_ENDPOINT || !AZURE_VISION_KEY) {
+  const {
+    endpoint,
+    key,
+    apiVersion,
+    postTimeoutMs,
+    pollMs,
+    pollTimeoutMs,
+    pollMaxAttempts,
+    retryMaxMs
+  } = getAzureConfig();
+
+  if (!endpoint || !key) {
     throw Object.assign(new Error("Azure Vision endpoint/key missing"), { status: 500 });
   }
   const started = Date.now();
@@ -212,31 +256,62 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
   // Build submit URL with optional language hint; default to readingOrder=natural
   const qs = new URLSearchParams({ readingOrder: "natural" });
   if (languageHint) qs.set("language", languageHint);
-  const submitUrl = `${AZURE_VISION_ENDPOINT}/vision/${AZURE_VISION_API_VERSION}/read/analyze?${qs.toString()}`;
+  const submitUrl = `${endpoint}/vision/${apiVersion}/read/analyze?${qs.toString()}`;
 
   // Submit
-  const submit = await axios.post(submitUrl, toSend, {
-    headers: {
-      "Ocp-Apim-Subscription-Key": AZURE_VISION_KEY,
-      "Content-Type": "application/pdf"
-    },
-    timeout: AZURE_POST_TIMEOUT_MS,
-    maxBodyLength: Infinity,
-    validateStatus: s => s === 202
-  });
+  let submit;
+  try {
+    submit = await axios.post(submitUrl, toSend, {
+      headers: {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/pdf"
+      },
+      timeout: postTimeoutMs,
+      maxBodyLength: Infinity,
+      validateStatus: () => true,
+      signal: globalThis.AbortSignal?.timeout?.(postTimeoutMs)
+    });
+  } catch (err) {
+    const known = new Set(["azure_failed", "azure_timeout"]);
+    const statusIsNumber = typeof err?.status === "number";
+    const codeIsKnown = err && typeof err === "object" && known.has(err.code);
+    if (statusIsNumber || codeIsKnown) {
+      throw err;
+    }
+
+    if (err && typeof err === "object" && "response" in err && err.response) {
+      const status = err.response?.status ?? 502;
+      const submitError = new Error(`Azure submit HTTP ${status}`);
+      submitError.status = 502;
+      submitError.code = "azure_failed";
+      submitError.detail = { upstreamStatus: status, body: err.response?.data };
+      throw submitError;
+    }
+    const networkErr = new Error("Azure submit network error");
+    networkErr.status = 502;
+    networkErr.code = "azure_failed";
+    networkErr.detail = String(err instanceof Error ? err.message : err);
+    throw networkErr;
+  }
+
+  if (submit.status !== 202) {
+    const submitError = new Error(`Azure submit HTTP ${submit.status}`);
+    submitError.status = 502;
+    submitError.code = "azure_failed";
+    submitError.detail = { upstreamStatus: submit.status, body: submit.data };
+    throw submitError;
+  }
 
   const opLoc = submit.headers["operation-location"];
   if (!opLoc) throw Object.assign(new Error("Azure Read missing Operation-Location"), { status: 502 });
   const opId = opLoc.split("/").pop();
 
   // Poll with bounded retries/backoff for transient 429/5xx, honor Retry-After
-  const deadline = Date.now() + AZURE_POLL_TIMEOUT_MS;
-  const maxAttempts = Number.isFinite(AZURE_POLL_MAX_ATTEMPTS) && AZURE_POLL_MAX_ATTEMPTS > 0
-    ? AZURE_POLL_MAX_ATTEMPTS
-    : 60;
+  const deadline = Date.now() + pollTimeoutMs;
+  const maxAttempts = pollMaxAttempts;
   let resultJson = null;
   let attempt = 0;
-  let delayMs = AZURE_POLL_MS;
+  let delayMs = pollMs;
 
   while (attempt < maxAttempts && Date.now() < deadline) {
     if (attempt > 0) {
@@ -246,10 +321,10 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
 
     try {
       const poll = await axios.get(
-        `${AZURE_VISION_ENDPOINT}/vision/${AZURE_VISION_API_VERSION}/read/analyzeResults/${opId}`,
+        `${endpoint}/vision/${apiVersion}/read/analyzeResults/${opId}`,
         {
-          headers: { "Ocp-Apim-Subscription-Key": AZURE_VISION_KEY },
-          timeout: Math.max(2000, AZURE_POLL_MS),
+          headers: { "Ocp-Apim-Subscription-Key": key },
+          timeout: clamp(Math.max(500, pollMs * 5), 500, pollTimeoutMs),
           validateStatus: () => true
         }
       );
@@ -257,30 +332,29 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       const httpStatus = poll.status;
       const retryAfterMs = parseRetryAfter(poll.headers["retry-after"]);
       const boundedDelay = retryAfterMs !== null
-        ? clamp(retryAfterMs, AZURE_POLL_MS, AZURE_RETRY_MAX_MS)
-        : 1000;
+        ? clamp(retryAfterMs, pollMs, retryMaxMs)
+        : pollMs;
       delayMs = boundedDelay;
 
       // Handle non-200 responses
       if (httpStatus !== 200) {
-        // Fail fast for 4xx (except 429) and other non-retryable statuses
         if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429) {
           const e = new Error(`Azure poll HTTP ${httpStatus}`);
-          e.status = httpStatus;
-          e.detail = poll.data;
+          e.status = 502;
+          e.code = "azure_failed";
+          e.detail = { upstreamStatus: httpStatus, body: poll.data };
           throw e;
         }
 
-        // Retry 429 and 5xx with Retry-After support
         if (httpStatus === 429 || httpStatus >= 500) {
           delayMs = boundedDelay;
           continue;
         }
 
-        // Other errors
         const e = new Error(`Azure poll HTTP ${httpStatus}`);
-        e.status = httpStatus || 502;
-        e.detail = poll.data;
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = { upstreamStatus: httpStatus, body: poll.data };
         throw e;
       }
 
@@ -288,21 +362,40 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       const st = poll.data?.status;
       if (st === "succeeded") { resultJson = poll.data; break; }
       if (st === "failed") {
-        const e = new Error("Azure Read failed");
-        e.status = 502;
-        e.detail = poll.data;
-        throw e;
+        const detailMessage =
+          poll.data?.error?.message ??
+          poll.data?.analyzeResult?.errors?.[0]?.message ??
+          "unknown";
+        const azureError = new Error(`Azure Read failed: ${detailMessage}`);
+        azureError.status = 502;
+        azureError.code = "azure_failed";
+        azureError.detail = poll.data;
+        throw azureError;
       }
       // notStarted/running → continue polling
       continue;
 
     } catch (err) {
-      // Axios errors (network, timeout, etc.)
-      if (!err.response) {
-        throw Object.assign(new Error("Azure Read network error"), { status: 502, detail: err.message });
+      const known = new Set(["azure_failed", "azure_timeout"]);
+      const statusIsNumber = typeof err?.status === "number";
+      const codeIsKnown = err && typeof err === "object" && known.has(err.code);
+      if (statusIsNumber || codeIsKnown) {
+        throw err;
       }
-      // Re-throw errors we've already handled above
-      throw err;
+
+      if (err?.response) {
+        const e = new Error("Azure Read network error");
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = { upstreamStatus: err.response.status, body: err.response.data };
+        throw e;
+      }
+
+      const e = new Error("Azure Read network error");
+      e.status = 502;
+      e.code = "azure_failed";
+      e.detail = String(err instanceof Error ? err.message : err);
+      throw e;
     }
   }
 
@@ -311,14 +404,16 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       if (LOG_LEVEL !== "silent") {
         console.error(`Azure Read exceeded poll attempts`, { requestId, opId, attempts: attempt });
       }
-      const e = new Error("Azure Read exceeded poll attempts");
-      e.status = 500;
+      const e = new Error(`Azure Read timed out after ${attempt} polls`);
+      e.status = 504;
+      e.code = "azure_timeout";
       e.meta = { attempts: attempt };
       e.detail = { opId };
       throw e;
     }
-    const timeoutErr = new Error("Azure Read timeout");
-    timeoutErr.status = 408;
+    const timeoutErr = new Error("Azure Read timed out before completion");
+    timeoutErr.status = 504;
+    timeoutErr.code = "azure_timeout";
     timeoutErr.detail = { opId };
     throw timeoutErr;
   }
@@ -427,23 +522,27 @@ app.post("/extract", async (req, res) => {
       return bad(res, 415, `Unsupported mime: ${mime}`, { code: "unsupported_mime" });
     }
   } catch (err) {
-    const code = err.status || 500;
+    const status = err?.status ?? err?.statusCode ?? 500;
     if (LOG_LEVEL !== "silent") {
-      console.error(`[${requestId}] OCR error`, { code, message: err.message });
+      console.error(`[${requestId}] OCR error`, { status, code: err?.code, message: err?.message });
     }
     const errorPayload = {
-      code: String(code),
-      httpStatus: code,
+      code: typeof err?.code === "string" ? err.code : String(status),
+      httpStatus: status,
       message: "OCR failed",
       requestId
     };
     if (err.meta && typeof err.meta === "object" && err.meta !== null) {
       errorPayload.meta = err.meta;
     }
-    return res.status(code).json({ error: errorPayload });
+    return res.status(status).json({ error: errorPayload });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(JSON.stringify({ level: "info", message: "OCR webhook listening", port: PORT }));
-});
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    console.log(JSON.stringify({ level: "info", message: "OCR webhook listening", port: PORT }));
+  });
+}
+
+export default app;
