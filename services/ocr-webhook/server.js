@@ -272,6 +272,13 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       signal: globalThis.AbortSignal?.timeout?.(postTimeoutMs)
     });
   } catch (err) {
+    const known = new Set(["azure_failed", "azure_timeout"]);
+    const statusIsNumber = typeof err?.status === "number";
+    const codeIsKnown = err && typeof err === "object" && known.has(err.code);
+    if (statusIsNumber || codeIsKnown) {
+      throw err;
+    }
+
     if (err && typeof err === "object" && "response" in err && err.response) {
       const status = err.response?.status ?? 502;
       const submitError = new Error(`Azure submit HTTP ${status}`);
@@ -283,7 +290,7 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
     const networkErr = new Error("Azure submit network error");
     networkErr.status = 502;
     networkErr.code = "azure_failed";
-    networkErr.detail = err instanceof Error ? err.message : String(err);
+    networkErr.detail = String(err instanceof Error ? err.message : err);
     throw networkErr;
   }
 
@@ -369,17 +376,26 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       continue;
 
     } catch (err) {
-      if (err && typeof err === "object" && (err.code || err.status)) {
+      const known = new Set(["azure_failed", "azure_timeout"]);
+      const statusIsNumber = typeof err?.status === "number";
+      const codeIsKnown = err && typeof err === "object" && known.has(err.code);
+      if (statusIsNumber || codeIsKnown) {
         throw err;
       }
-      // Axios errors (network, timeout, etc.)
-      if (!err?.response) {
-        const networkErr = new Error("Azure Read network error");
-        networkErr.status = 502;
-        networkErr.detail = err instanceof Error ? err.message : String(err);
-        throw networkErr;
+
+      if (err?.response) {
+        const e = new Error("Azure Read network error");
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = { upstreamStatus: err.response.status, body: err.response.data };
+        throw e;
       }
-      throw err;
+
+      const e = new Error("Azure Read network error");
+      e.status = 502;
+      e.code = "azure_failed";
+      e.detail = String(err instanceof Error ? err.message : err);
+      throw e;
     }
   }
 

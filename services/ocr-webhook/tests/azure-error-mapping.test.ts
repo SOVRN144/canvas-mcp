@@ -139,4 +139,50 @@ describe("Azure error mapping", () => {
     expect(ax.post).toHaveBeenCalledTimes(1);
     expect(ax.get).not.toHaveBeenCalled();
   });
+
+  it("returns 502 when poll rejects with a response (normalized azure_failed)", async () => {
+    ax.post.mockResolvedValueOnce({
+      status: 202,
+      headers: { "operation-location": "https://azure.example.com/vision/operations/op123" }
+    });
+
+    const rejection = new Error("unauthorized");
+    rejection.response = { status: 401, data: { message: "unauthorized" } };
+    ax.get.mockRejectedValueOnce(rejection);
+
+    const response = await request(app)
+      .post("/extract")
+      .set("Content-Type", "application/json")
+      .send({
+        mime: "application/pdf",
+        dataBase64: SAMPLE_PDF_BASE64
+      });
+
+    expect(response.status).toBe(502);
+    expect(response.body.error?.code ?? response.body.code).toBe("azure_failed");
+    expect(ax.post).toHaveBeenCalledTimes(1);
+    expect(ax.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 502 when poll rejects without a response (network error → azure_failed)", async () => {
+    ax.post.mockResolvedValueOnce({
+      status: 202,
+      headers: { "operation-location": "https://azure.example.com/vision/operations/opNet" }
+    });
+
+    ax.get.mockRejectedValueOnce(new Error("socket hang up"));
+
+    const response = await request(app)
+      .post("/extract")
+      .set("Content-Type", "application/json")
+      .send({
+        mime: "application/pdf",
+        dataBase64: SAMPLE_PDF_BASE64
+      });
+
+    expect(response.status).toBe(502);
+    expect(response.body.error?.code ?? response.body.code).toBe("azure_failed");
+    expect(ax.post).toHaveBeenCalledTimes(1);
+    expect(ax.get).toHaveBeenCalledTimes(1);
+  });
 });
