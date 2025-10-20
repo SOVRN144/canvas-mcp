@@ -3,10 +3,13 @@
 HTTP service that accepts `{ mime, dataBase64, languages?, maxPages? }` and returns `{ text, pagesOcred, meta }`.
 
 ## Routing
-- `image/*` → OpenAI Vision via Responses API with `image_url` as data URL (sync)
-- `application/pdf` → Azure Vision Read (async submit+poll with retry/backoff)
-- Optional **PDF pre-slicing**: if `PDF_PRESLICE=1`, the webhook trims the input PDF to `maxPages` (or `OCR_MAX_PAGES`) **before** sending to Azure (controls cost/latency).
-- **Soft page limit**: if `PDF_PRESLICE=0` and `PDF_SOFT_LIMIT=1`, PDFs whose page count exceeds `maxPages`/`OCR_MAX_PAGES` are rejected with a 400 error (prevents unexpected Azure spend).
+- `image/*` → OpenAI Vision via Responses API with `image_url` as a data URL (synchronous).
+- `application/pdf` → Deterministic selection per request:
+  1. If `PDF_PRESLICE` is truthy **and** `OPENAI_API_KEY` is present → render PDF → PNG via `pdfjs-dist` + `@napi-rs/canvas`, OCR each page with OpenAI.
+  2. Else if Azure Vision endpoint+key configured → Azure Read (submit + poll with retry/backoff).
+  3. Else if `OPENAI_API_KEY` present → OpenAI preslice fallback (same as step 1).
+  4. Else → `501` with `{ error.code: "no_ocr_engine" }`.
+- **Soft page limit** (Azure protection): when `PDF_PRESLICE` is falsey and `PDF_SOFT_LIMIT` truthy, PDFs whose page count exceeds `maxPages`/`OCR_MAX_PAGES` are rejected (400) to avoid unexpected Azure spend.
 
 ## Env
 - `OPENAI_API_KEY` (required for images)
@@ -16,19 +19,38 @@ HTTP service that accepts `{ mime, dataBase64, languages?, maxPages? }` and retu
 - `AZURE_VISION_KEY`
 - `AZURE_VISION_API_VERSION` (default `v3.2`) — Azure Read API version
 - `AZURE_POST_TIMEOUT_MS` (default `15000`)
-- `AZURE_POLL_MS` (default `1500`)
-- `AZURE_POLL_TIMEOUT_MS` (default `30000`) — Azure path returns **408** on poll timeout
-- `AZURE_RETRY_MAX` (default `5`) — transient 429/5xx retries during polling
-- `AZURE_RETRY_BASE_MS` (default `400`)
-- `AZURE_RETRY_JITTER_MS` (default `250`)
-- `AZURE_RETRY_MAX_MS` (default `60000`) — ceiling for Retry-After parsing and backoff delays
-- `PDF_PRESLICE` (default `0`) — set to `1` to enable in-memory page trimming
+- `AZURE_POLL_MS` (default `1000`)
+- `AZURE_POLL_TIMEOUT_MS` (default `30000`) — Azure path returns **504** on poll timeout
+- `AZURE_POLL_MAX_ATTEMPTS` (default `60`)
+- `AZURE_RETRY_MAX_MS` (default `60000`) — ceiling for Retry-After/backoff delays
+- `PDF_PRESLICE` (default false) — set to any truthy string (`1`, `true`, `yes`, `on`) to enable OpenAI preslice routing
 - `PDF_SOFT_LIMIT` (default `1`) — when `PDF_PRESLICE=0`, reject PDFs whose page count exceeds `maxPages`/`OCR_MAX_PAGES` (prevents unexpected Azure spend)
+- `PRESLICE_DPI` (default `144`) — scale factor for PDF → PNG rendering (`dpi / 72`)
+- `PRESLICE_MAX_PAGES` (default `5`) — hard cap on number of pages rendered per request
+- `PRESLICE_MAX_OUTPUT_MB` (default `64`) — guardrail on total PNG output size before aborting
 - `OCR_WEBHOOK_SECRET` (HMAC; if set, include `X-Signature: sha256=<hex>` over **raw** body)
 - `OCR_MAX_BYTES` default `15000000`
 - `OCR_MAX_PAGES` default `25`
 - `PORT` default `8080`
 - `LOG_LEVEL` default `info`
+
+## PDF preslicing (OpenAI Vision)
+- Renders PDF pages to PNG using `pdfjs-dist` (legacy build) and `@napi-rs/canvas` (prebuilt binaries; no system packages required).
+- Honors `PRESLICE_DPI`, `PRESLICE_MAX_PAGES`, and `PRESLICE_MAX_OUTPUT_MB` to keep memory and CPU bounded.
+- Each rendered page is OCR’d with the existing OpenAI Vision image pipeline; `meta.engine` remains `openai-vision` and `meta.pdf.presliced` is `true`.
+- If rendering exceeds `PRESLICE_MAX_OUTPUT_MB`, the request fails fast with `413 preslice_output_too_large`.
+- The preslicer is lazy-loaded on demand so cold start remains fast for non-PDF traffic.
+
+### Engine selection matrix
+
+| Condition | Engine |
+| --- | --- |
+| `PDF_PRESLICE` truthy **and** `OPENAI_API_KEY` set | OpenAI preslice |
+| else if Azure endpoint & key present | Azure Read |
+| else if `OPENAI_API_KEY` set | OpenAI preslice fallback |
+| else | `501` `no_ocr_engine` |
+
+Trailing slashes on `AZURE_VISION_ENDPOINT` are ignored automatically.
 
 ## Run
 ```bash
@@ -71,12 +93,12 @@ curl -s http://127.0.0.1:8080/extract \
   -d "$PAYLOAD" | jq .
 ```
 
-### PDF (with pre-slicing):
+### PDF (OpenAI preslice):
 ```bash
 export PDF_PRESLICE=1
 PDF=scan.pdf
 B64=$(base64 < "$PDF" | tr -d '\n')
-# request only first 10 pages sent to Azure
+# request only first 10 pages to be rendered/OCR'd
 PAYLOAD=$(jq -nc --arg m "application/pdf" --arg d "$B64" '{mime:$m, dataBase64:$d, maxPages:10}')
 SIG=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$OCR_WEBHOOK_SECRET" -binary | xxd -p -c 256)
 
@@ -84,7 +106,7 @@ curl -s http://127.0.0.1:8080/extract \
   -H 'content-type: application/json' \
   -H "x-signature: sha256=$SIG" \
   -d "$PAYLOAD" | jq .
-# meta.pdf should include: { presliced:true, originalPages:<N>, submittedPages:10 }
+# meta.engine === "openai-vision"; meta.pdf.presliced === true
 ```
 
 ### Negative smoke (soft limit):
@@ -131,10 +153,10 @@ export OCR_TIMEOUT_MS=20000
 ## Notes
 - **Request-ID passthrough**: Send `X-Request-ID` header to correlate logs; the service echoes it in response headers and includes `requestId` in both success and error responses.
 - **Language hints**: You may pass `languages` as an array or string; only the first is forwarded to Azure as `language`. If unsure, omit it—incorrect hints can reduce recall.
-- **Pre-slicing**: Uses `pdf-lib` in memory. For very large PDFs, memory usage rises with page count; keep `OCR_MAX_BYTES` conservative and consider streaming input upstream if needed.
+- **PDF preslicing**: Uses `pdfjs-dist` + `@napi-rs/canvas` to rasterize pages for the OpenAI path. Azure trimming (when OpenAI unavailable) still uses `pdf-lib` to copy the first N pages without rendering.
 - **Soft limit**: When `PDF_PRESLICE=0` and `PDF_SOFT_LIMIT=1`, PDFs exceeding `maxPages`/`OCR_MAX_PAGES` are rejected immediately to prevent unexpected Azure spend. Enable `PDF_PRESLICE=1` to automatically trim instead.
-- **Azure polling**: The poller treats non-200 HTTP responses as errors. On 429/5xx, it retries up to `AZURE_RETRY_MAX`, honoring `Retry-After` headers (supports both seconds and HTTP-date formats) with clamping to `[AZURE_POLL_MS, AZURE_RETRY_MAX_MS]`. Other 4xx statuses fail fast. Long timeouts surface a 408.
-- **Timeout semantics**: OpenAI path returns **504** on timeout; Azure path returns **408** on internal poll timeout.
+- **Azure polling**: The poller treats non-200 HTTP responses as errors. On 429/5xx, it retries honoring `Retry-After` headers (HTTP-date or seconds) with clamping to `[AZURE_POLL_MS, AZURE_RETRY_MAX_MS]`. Other 4xx statuses fail fast. Long timeouts surface a 504 with `code:"azure_timeout"`.
+- **Timeout semantics**: Both engines return **504** on timeout (Azure uses `code:"azure_timeout"`; OpenAI reports `message:"OpenAI OCR timed out"`).
 - **Error responses**: All errors include `{ error: { code: string, httpStatus: number, message: string, ...extra } }` format.
 - **Base64 validation**: Strict validation with canonical form checking to prevent malformed input.
 - **Docker**: Image runs as non-root user `app:app` with `HEALTHCHECK` for container orchestration.
