@@ -259,15 +259,41 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
   const submitUrl = `${endpoint}/vision/${apiVersion}/read/analyze?${qs.toString()}`;
 
   // Submit
-  const submit = await axios.post(submitUrl, toSend, {
-    headers: {
-      "Ocp-Apim-Subscription-Key": key,
-      "Content-Type": "application/pdf"
-    },
-    timeout: postTimeoutMs,
-    maxBodyLength: Infinity,
-    validateStatus: s => s === 202
-  });
+  let submit;
+  try {
+    submit = await axios.post(submitUrl, toSend, {
+      headers: {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/pdf"
+      },
+      timeout: postTimeoutMs,
+      maxBodyLength: Infinity,
+      validateStatus: () => true,
+      signal: globalThis.AbortSignal?.timeout?.(postTimeoutMs)
+    });
+  } catch (err) {
+    if (err && typeof err === "object" && "response" in err && err.response) {
+      const status = err.response?.status ?? 502;
+      const submitError = new Error(`Azure submit HTTP ${status}`);
+      submitError.status = 502;
+      submitError.code = "azure_failed";
+      submitError.detail = { upstreamStatus: status, body: err.response?.data };
+      throw submitError;
+    }
+    const networkErr = new Error("Azure submit network error");
+    networkErr.status = 502;
+    networkErr.code = "azure_failed";
+    networkErr.detail = err instanceof Error ? err.message : String(err);
+    throw networkErr;
+  }
+
+  if (submit.status !== 202) {
+    const submitError = new Error(`Azure submit HTTP ${submit.status}`);
+    submitError.status = 502;
+    submitError.code = "azure_failed";
+    submitError.detail = { upstreamStatus: submit.status, body: submit.data };
+    throw submitError;
+  }
 
   const opLoc = submit.headers["operation-location"];
   if (!opLoc) throw Object.assign(new Error("Azure Read missing Operation-Location"), { status: 502 });
@@ -305,24 +331,23 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
 
       // Handle non-200 responses
       if (httpStatus !== 200) {
-        // Fail fast for 4xx (except 429) and other non-retryable statuses
         if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429) {
           const e = new Error(`Azure poll HTTP ${httpStatus}`);
-          e.status = httpStatus;
-          e.detail = poll.data;
+          e.status = 502;
+          e.code = "azure_failed";
+          e.detail = { upstreamStatus: httpStatus, body: poll.data };
           throw e;
         }
 
-        // Retry 429 and 5xx with Retry-After support
         if (httpStatus === 429 || httpStatus >= 500) {
           delayMs = boundedDelay;
           continue;
         }
 
-        // Other errors
         const e = new Error(`Azure poll HTTP ${httpStatus}`);
-        e.status = httpStatus || 502;
-        e.detail = poll.data;
+        e.status = 502;
+        e.code = "azure_failed";
+        e.detail = { upstreamStatus: httpStatus, body: poll.data };
         throw e;
       }
 

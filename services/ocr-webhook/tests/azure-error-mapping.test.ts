@@ -117,4 +117,26 @@ describe("Azure error mapping", () => {
     expect(ax.post).toHaveBeenCalledTimes(1);
     expect(ax.get.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
+
+  it("returns 502 when Azure submit returns 401 (normalized azure_failed)", async () => {
+    ax.post.mockResolvedValueOnce({
+      status: 401,
+      data: { message: "unauthorized" }
+    });
+
+    ax.get.mockResolvedValue({ status: 200, headers: {}, data: {} });
+
+    const response = await request(app)
+      .post("/extract")
+      .set("Content-Type", "application/json")
+      .send({
+        mime: "application/pdf",
+        dataBase64: SAMPLE_PDF_BASE64
+      });
+
+    expect(response.status).toBe(502);
+    expect(response.body.error?.code ?? response.body.code).toBe("azure_failed");
+    expect(ax.post).toHaveBeenCalledTimes(1);
+    expect(ax.get).not.toHaveBeenCalled();
+  });
 });
