@@ -313,9 +313,10 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
   const combinedText = outTexts.filter(t => typeof t === "string").join("\n\n").trim();
   const submittedPages = pagesOcred.length;
   const originalPages = typeof totalPages === "number" ? totalPages : submittedPages;
-  const preslicedFlag = typeof totalPages === "number"
-    ? (totalPages > submittedPages)
-    : (submittedPages > 0);
+  const preslicedFlag =
+    typeof totalPages === "number"
+      ? (totalPages > submittedPages)
+      : (submittedPages < (typeof maxPages === "number" ? maxPages : submittedPages));
 
   return {
     text: combinedText,
@@ -464,27 +465,12 @@ async function ocrWithAzurePdf({ data, maxPages, languageHint, requestId }) {
       continue;
 
     } catch (err) {
-      // Axios errors (network, timeout, etc.)
-      if (!err.response) {
-        const e = new Error("Azure Read network error");
-        e.status = 502;
-        e.code = "azure_failed";
-        e.detail = String(err instanceof Error ? err.message : err);
-        throw e;
-      }
-
-      if (err?.response) {
-        const e = new Error("Azure Read network error");
-        e.status = 502;
-        e.code = "azure_failed";
-        e.detail = { upstreamStatus: err.response.status, body: err.response.data };
-        throw e;
-      }
-
       const e = new Error("Azure Read network error");
       e.status = 502;
       e.code = "azure_failed";
-      e.detail = String(err instanceof Error ? err.message : err);
+      e.detail = err?.response
+        ? { upstreamStatus: err.response.status, body: err.response.data }
+        : String(err instanceof Error ? err.message : err);
       throw e;
     }
   }
