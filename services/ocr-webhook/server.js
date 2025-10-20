@@ -317,7 +317,7 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
   const preslicedFlag =
     typeof totalPages === "number"
       ? (totalPages > submittedPages)
-      : (submittedPages < (typeof maxPages === "number" ? maxPages : submittedPages));
+      : (submittedPages >= maxPages);
 
   return {
     text: combinedText,
