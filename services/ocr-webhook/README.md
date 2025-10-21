@@ -158,8 +158,18 @@ export OCR_TIMEOUT_MS=20000
 - **Azure polling**: The poller treats non-200 HTTP responses as errors. On 429/5xx, it retries honoring `Retry-After` headers (HTTP-date or seconds) with clamping to `[AZURE_POLL_MS, AZURE_RETRY_MAX_MS]`. Other 4xx statuses fail fast. Long timeouts surface a 504 with `code:"azure_timeout"`.
 - **Timeout semantics**: Both engines return **504** on timeout (Azure uses `code:"azure_timeout"`; OpenAI reports `message:"OpenAI OCR timed out"`).
 - **Error responses**: All errors include `{ error: { code: string, httpStatus: number, message: string, ...extra } }` format.
+- **Error sanitizer knobs**: See “Error payload size knobs (optional)” below for env overrides.
 - **Base64 validation**: Strict validation with canonical form checking to prevent malformed input.
 - **Docker**: Image runs as non-root user `app:app` with `HEALTHCHECK` for container orchestration.
+
+### Error payload size knobs (optional)
+
+The sanitizer trims large or circular structures before emitting JSON. You can adjust the bounds via env vars (values are clamped to safe ranges):
+
+- `ERROR_MAX_STRING` (default `2000`)
+- `ERROR_MAX_ENTRIES` (default `20`)
+- `ERROR_MAX_ARRAY_ITEMS` (default `20`)
+- `ERROR_MAX_DEPTH` (default `3`)
 
 ## Acceptance Criteria
 

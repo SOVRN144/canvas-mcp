@@ -40,6 +40,13 @@ function parsePositiveNumber(v, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function parseBoundedIntEnv(name, def, min, max) {
+  const raw = process.env[name];
+  const n = raw != null ? Number.parseInt(String(raw), 10) : NaN;
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
+}
+
 function normalizeAzureEndpoint(raw) {
   if (!raw) return "";
   return String(raw).replace(/\/+$/, "");
@@ -187,10 +194,10 @@ function bytesFromBase64Strict(b64, maxBytes) {
   return canon === target ? buf : null;
 }
 
-const MAX_ERROR_STRING = 2_048;
-const MAX_ERROR_ENTRIES = 20;
-const MAX_ERROR_ARRAY_ITEMS = 20;
-const MAX_ERROR_DEPTH = 3;
+const MAX_ERROR_STRING = parseBoundedIntEnv("ERROR_MAX_STRING", 2_000, 256, 65_536);
+const MAX_ERROR_ENTRIES = parseBoundedIntEnv("ERROR_MAX_ENTRIES", 20, 5, 500);
+const MAX_ERROR_ARRAY_ITEMS = parseBoundedIntEnv("ERROR_MAX_ARRAY_ITEMS", 20, 5, 500);
+const MAX_ERROR_DEPTH = parseBoundedIntEnv("ERROR_MAX_DEPTH", 3, 1, 10);
 
 function truncateErrorString(str) {
   if (typeof str !== "string") return "";
@@ -685,7 +692,6 @@ app.post("/extract", async (req, res) => {
     }
     const buf = bytesFromBase64Strict(dataBase64, OCR_MAX_BYTES);
     if (!buf) return bad(res, 400, "dataBase64 is not valid base64", { code: "invalid_base64" });
-    if (buf.length > OCR_MAX_BYTES) return bad(res, 400, "Payload too large", { code: "payload_too_large", maxBytes: OCR_MAX_BYTES });
 
     // Optional language hint (Azure: wrong code can reduce recall; default to none)
     const languageHint = Array.isArray(languages) ? languages[0]
