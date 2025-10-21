@@ -21,7 +21,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const MIN_IMAGE_PX = parseInt(process.env.MIN_IMAGE_PX || "0", 10);
 const OCR_WEBHOOK_SECRET = process.env.OCR_WEBHOOK_SECRET || ""; // if set, requests must be HMAC-signed
-const OCR_MAX_BYTES = Number(process.env.OCR_MAX_BYTES || 15_000_000); // 15 MB default
+const OCR_MAX_BYTES = parsePositiveNumber(process.env.OCR_MAX_BYTES, 25 * 1024 * 1024); // 25 MB default
 const OCR_MAX_PAGES = Number(process.env.OCR_MAX_PAGES || 25);
 
 function isTruthy(v) {
@@ -38,6 +38,13 @@ function parsePositiveInt(v, fallback) {
 function parsePositiveNumber(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parseBoundedIntEnv(name, def, min, max) {
+  const raw = process.env[name];
+  const n = raw != null ? Number.parseInt(String(raw), 10) : NaN;
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
 }
 
 function normalizeAzureEndpoint(raw) {
@@ -110,7 +117,10 @@ app.get("/ready", (_req, res) => {
 function bad(res, httpStatus, message, extra = {}) {
   const code = typeof extra.code === "string" ? extra.code : String(httpStatus);
   const { code: _drop, ...rest } = extra;
-  return res.status(httpStatus).json({ error: { code, httpStatus, message, ...rest } });
+  const requestId = res.get("X-Request-ID");
+  const error = { code, httpStatus, message, ...rest };
+  if (requestId) error.requestId = requestId;
+  return res.status(httpStatus).json({ error });
 }
 
 function verifySignature(req) {
@@ -128,15 +138,149 @@ function verifySignature(req) {
   return a.length === e.length && crypto.timingSafeEqual(a, e);
 }
 
-function bytesFromBase64Strict(b64) {
+function bytesFromBase64Strict(b64, maxBytes) {
   if (typeof b64 !== "string") return null;
-  const clean = b64.replace(/\s+/g, "");
-  const ok = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(clean);
-  if (!ok) return null;
-  const buf = Buffer.from(clean, "base64");
+  let clean = b64.replace(/\s+/g, "");
+  if (clean.length === 0) return Buffer.alloc(0);
+
+  const len = clean.length;
+  if (len % 4 === 1) return null; // Base64 strings can't have remainder 1
+
+  // Optional base64url normalization (enable if needed)
+  // clean = clean.replace(/-/g, "+").replace(/_/g, "/");
+
+  let paddingIndex = len;
+  for (let i = 0; i < len; i++) {
+    const code = clean.charCodeAt(i);
+    const isAlpha = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    const isDigit = code >= 48 && code <= 57;
+    const isPlus = code === 43;
+    const isSlash = code === 47;
+    const isEquals = code === 61;
+    if (!(isAlpha || isDigit || isPlus || isSlash || isEquals)) {
+      return null;
+    }
+    if (isEquals) {
+      if (paddingIndex === len) paddingIndex = i;
+    } else if (paddingIndex !== len) {
+      // Non '=' after padding started
+      return null;
+    }
+  }
+
+  const paddingLength = paddingIndex === len ? 0 : len - paddingIndex;
+  if (paddingLength > 2) return null;
+  if (paddingLength > 0) {
+    for (let i = paddingIndex; i < len; i++) {
+      if (clean.charCodeAt(i) !== 61) return null;
+    }
+  }
+
+  // Pre-decode size estimate: payload chars × 3 / 4, minus padding
+  if (typeof maxBytes === "number" && maxBytes > 0) {
+    const payloadChars = paddingIndex === len ? len : paddingIndex;
+    const estimatedBytes = Math.floor((payloadChars * 3) / 4);
+    if (estimatedBytes > maxBytes) return null;
+  }
+
+  let buf;
+  try {
+    buf = Buffer.from(clean, "base64");
+  } catch {
+    return null;
+  }
   const canon = buf.toString("base64").replace(/=+$/, "");
   const target = clean.replace(/=+$/, "");
   return canon === target ? buf : null;
+}
+
+const MAX_ERROR_STRING = parseBoundedIntEnv("ERROR_MAX_STRING", 2_000, 256, 65_536);
+const MAX_ERROR_ENTRIES = parseBoundedIntEnv("ERROR_MAX_ENTRIES", 20, 5, 500);
+const MAX_ERROR_ARRAY_ITEMS = parseBoundedIntEnv("ERROR_MAX_ARRAY_ITEMS", 20, 5, 500);
+const MAX_ERROR_DEPTH = parseBoundedIntEnv("ERROR_MAX_DEPTH", 3, 1, 10);
+
+function truncateErrorString(str) {
+  if (typeof str !== "string") return "";
+  if (str.length <= MAX_ERROR_STRING) return str;
+  return `${str.slice(0, MAX_ERROR_STRING)}…(+${str.length - MAX_ERROR_STRING} chars)`;
+}
+
+function sanitizeErrorValue(value, depth = 0, seen = new WeakSet()) {
+  if (value == null) return undefined;
+  if (typeof value === "string") return truncateErrorString(value);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Error) {
+    const out = {
+      message: truncateErrorString(value.message || value.toString())
+    };
+    if (value.name && value.name !== "Error") out.name = value.name;
+    if (value.code) out.code = String(value.code);
+    if (typeof value.status === "number") out.status = value.status;
+    return out;
+  }
+  if (Buffer.isBuffer(value)) return `<Buffer length=${value.length}>`;
+  if (ArrayBuffer.isView(value)) {
+    const name = value.constructor?.name || "TypedArray";
+    const len = typeof value.length === "number" ? value.length : value.byteLength;
+    return `<${name} length=${len}>`;
+  }
+  if (typeof value !== "object") return truncateErrorString(String(value));
+
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (depth >= MAX_ERROR_DEPTH) return "[Truncated]";
+
+  if (Array.isArray(value)) {
+    const out = [];
+    const limit = Math.min(value.length, MAX_ERROR_ARRAY_ITEMS);
+    for (let i = 0; i < limit; i++) {
+      const entry = value[i];
+      if (entry == null) {
+        out.push(entry);
+      } else if (typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean") {
+        out.push(entry);
+      } else {
+        const clean = sanitizeErrorValue(entry, depth + 1, seen);
+        if (clean !== undefined && typeof clean !== "object") {
+          out.push(clean);
+        }
+      }
+    }
+    if (value.length > limit) {
+      out.push(`[+${value.length - limit} items truncated]`);
+    }
+    return out;
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length > MAX_ERROR_ENTRIES) {
+    return {
+      _truncated: true,
+      keys: entries.slice(0, MAX_ERROR_ENTRIES).map(([key]) => key),
+      total: entries.length
+    };
+  }
+
+  const out = {};
+  for (const [key, val] of entries) {
+    const item = sanitizeErrorValue(val, depth + 1, seen);
+    if (item !== undefined) out[key] = item;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeErrorDetail(detail) {
+  const sanitized = sanitizeErrorValue(detail);
+  if (sanitized === undefined) return undefined;
+  if (typeof sanitized === "string" || typeof sanitized === "number" || typeof sanitized === "boolean") return sanitized;
+  if (Array.isArray(sanitized) || (typeof sanitized === "object" && sanitized !== null)) return sanitized;
+  return undefined;
+}
+
+function sanitizeErrorMeta(meta) {
+  const sanitized = sanitizeErrorValue(meta);
+  return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) ? sanitized : undefined;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -302,7 +446,17 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
       const current = nextIndex++;
       if (current >= pngBuffers.length) break;
       const png = pngBuffers[current];
-      const result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      let result;
+      try {
+        result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      } catch (err) {
+        const wrapped = new Error(err?.message || "OpenAI page OCR failed");
+        wrapped.status = err?.status || 502;
+        wrapped.code = err?.code || "openai_page_failed";
+        wrapped.detail = { page: current + 1, error: String(err?.message || err) };
+        wrapped.meta = { page: current + 1 };
+        throw wrapped;
+      }
       outTexts[current] = result.text || "";
       outPages[current] = current + 1;
     }
@@ -536,9 +690,8 @@ app.post("/extract", async (req, res) => {
     if (typeof mime !== "string" || typeof dataBase64 !== "string") {
       return bad(res, 400, "Missing required fields: mime, dataBase64", { code: "missing_fields" });
     }
-    const buf = bytesFromBase64Strict(dataBase64);
+    const buf = bytesFromBase64Strict(dataBase64, OCR_MAX_BYTES);
     if (!buf) return bad(res, 400, "dataBase64 is not valid base64", { code: "invalid_base64" });
-    if (buf.length > OCR_MAX_BYTES) return bad(res, 400, "Payload too large", { code: "payload_too_large", maxBytes: OCR_MAX_BYTES });
 
     // Optional language hint (Azure: wrong code can reduce recall; default to none)
     const languageHint = Array.isArray(languages) ? languages[0]
@@ -574,6 +727,9 @@ app.post("/extract", async (req, res) => {
       return res.json({ ...out, requestId });
     } else if (mime === "application/pdf") {
       const effMaxPages = coerceMaxPages(maxPages);
+      if (buf.length === 0) {
+        return bad(res, 400, "PDF is empty or corrupt", { code: "pdf_empty" });
+      }
       const wantsPreslice = getPdfPresliceEnabled();
       const softLimitEnabled = getPdfSoftLimitEnabled();
       const azure = getAzureConfig();
@@ -654,11 +810,13 @@ app.post("/extract", async (req, res) => {
       message,
       requestId
     };
-    if (err.meta && typeof err.meta === "object" && err.meta !== null) {
-      errorPayload.meta = err.meta;
+    const safeMeta = sanitizeErrorMeta(err?.meta);
+    if (safeMeta) {
+      errorPayload.meta = safeMeta;
     }
-    if (err?.detail && (typeof err.detail === "string" || (typeof err.detail === "object" && err.detail !== null))) {
-      errorPayload.detail = err.detail;
+    const safeDetail = sanitizeErrorDetail(err?.detail);
+    if (safeDetail !== undefined) {
+      errorPayload.detail = safeDetail;
     }
     return res.status(status).json({ error: errorPayload });
   }
