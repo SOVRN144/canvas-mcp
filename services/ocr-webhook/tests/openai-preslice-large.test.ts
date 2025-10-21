@@ -118,4 +118,37 @@ describe("OpenAI preslice handling for large PDFs", () => {
     expect(res.body.error.detail.huge.at(-1)).toContain("truncated");
     expect(openAiCreateMock).not.toHaveBeenCalled();
   });
+
+  it("rejects invalid base64 input early", async () => {
+    const res = await request(app)
+      .post("/extract")
+      .set("Content-Type", "application/json")
+      .send({ mime: "application/pdf", dataBase64: "ZGFYQ@==#", maxPages: 1 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error?.code).toBe("invalid_base64");
+    expect(res.body.error?.requestId).toBeTruthy();
+    expect(presliceMock).not.toHaveBeenCalled();
+    expect(openAiCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes Buffer and TypedArray in error detail", async () => {
+    const err = Object.assign(new Error("boom"), { status: 500, code: "x" });
+    const ta = new Uint8Array(128);
+    err.detail = { buf: Buffer.alloc(64), ta, dv: new DataView(ta.buffer) };
+    presliceMock.mockRejectedValueOnce(err);
+
+    const res = await request(app)
+      .post("/extract")
+      .set("Content-Type", "application/json")
+      .send({ mime: "application/pdf", dataBase64: LARGE_BASE64, maxPages: 1 });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error?.code).toBe("x");
+    expect(res.body.error?.detail).toBeDefined();
+    const detail = res.body.error.detail;
+    expect(String(detail.buf)).toMatch(/<Buffer length=\d+>/);
+    expect(String(detail.ta)).toMatch(/<Uint8Array length=128>/);
+    expect(String(detail.dv)).toMatch(/<DataView length=\d+>/);
+  });
 });

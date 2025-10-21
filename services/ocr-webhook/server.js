@@ -21,7 +21,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const MIN_IMAGE_PX = parseInt(process.env.MIN_IMAGE_PX || "0", 10);
 const OCR_WEBHOOK_SECRET = process.env.OCR_WEBHOOK_SECRET || ""; // if set, requests must be HMAC-signed
-const OCR_MAX_BYTES = Number(process.env.OCR_MAX_BYTES || 15_000_000); // 15 MB default
+const OCR_MAX_BYTES = parsePositiveNumber(process.env.OCR_MAX_BYTES, 25 * 1024 * 1024); // 25 MB default
 const OCR_MAX_PAGES = Number(process.env.OCR_MAX_PAGES || 25);
 
 function isTruthy(v) {
@@ -110,7 +110,10 @@ app.get("/ready", (_req, res) => {
 function bad(res, httpStatus, message, extra = {}) {
   const code = typeof extra.code === "string" ? extra.code : String(httpStatus);
   const { code: _drop, ...rest } = extra;
-  return res.status(httpStatus).json({ error: { code, httpStatus, message, ...rest } });
+  const requestId = res.get("X-Request-ID");
+  const error = { code, httpStatus, message, ...rest };
+  if (requestId) error.requestId = requestId;
+  return res.status(httpStatus).json({ error });
 }
 
 function verifySignature(req) {
@@ -128,13 +131,16 @@ function verifySignature(req) {
   return a.length === e.length && crypto.timingSafeEqual(a, e);
 }
 
-function bytesFromBase64Strict(b64) {
+function bytesFromBase64Strict(b64, maxBytes) {
   if (typeof b64 !== "string") return null;
-  const clean = b64.replace(/\s+/g, "");
+  let clean = b64.replace(/\s+/g, "");
   if (clean.length === 0) return Buffer.alloc(0);
 
   const len = clean.length;
   if (len % 4 === 1) return null; // Base64 strings can't have remainder 1
+
+  // Optional base64url normalization (enable if needed)
+  // clean = clean.replace(/-/g, "+").replace(/_/g, "/");
 
   let paddingIndex = len;
   for (let i = 0; i < len; i++) {
@@ -161,6 +167,13 @@ function bytesFromBase64Strict(b64) {
     for (let i = paddingIndex; i < len; i++) {
       if (clean.charCodeAt(i) !== 61) return null;
     }
+  }
+
+  // Pre-decode size estimate: payload chars × 3 / 4, minus padding
+  if (typeof maxBytes === "number" && maxBytes > 0) {
+    const payloadChars = paddingIndex === len ? len : paddingIndex;
+    const estimatedBytes = Math.floor((payloadChars * 3) / 4);
+    if (estimatedBytes > maxBytes) return null;
   }
 
   let buf;
@@ -200,7 +213,11 @@ function sanitizeErrorValue(value, depth = 0, seen = new WeakSet()) {
     return out;
   }
   if (Buffer.isBuffer(value)) return `<Buffer length=${value.length}>`;
-  if (ArrayBuffer.isView(value)) return `<${value.constructor?.name || "TypedArray"} length=${value.length}>`;
+  if (ArrayBuffer.isView(value)) {
+    const name = value.constructor?.name || "TypedArray";
+    const len = typeof value.length === "number" ? value.length : value.byteLength;
+    return `<${name} length=${len}>`;
+  }
   if (typeof value !== "object") return truncateErrorString(String(value));
 
   if (seen.has(value)) return "[Circular]";
@@ -430,6 +447,7 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
         wrapped.status = err?.status || 502;
         wrapped.code = err?.code || "openai_page_failed";
         wrapped.detail = { page: current + 1, error: String(err?.message || err) };
+        wrapped.meta = { page: current + 1 };
         throw wrapped;
       }
       outTexts[current] = result.text || "";
@@ -665,7 +683,7 @@ app.post("/extract", async (req, res) => {
     if (typeof mime !== "string" || typeof dataBase64 !== "string") {
       return bad(res, 400, "Missing required fields: mime, dataBase64", { code: "missing_fields" });
     }
-    const buf = bytesFromBase64Strict(dataBase64);
+    const buf = bytesFromBase64Strict(dataBase64, OCR_MAX_BYTES);
     if (!buf) return bad(res, 400, "dataBase64 is not valid base64", { code: "invalid_base64" });
     if (buf.length > OCR_MAX_BYTES) return bad(res, 400, "Payload too large", { code: "payload_too_large", maxBytes: OCR_MAX_BYTES });
 
@@ -703,6 +721,9 @@ app.post("/extract", async (req, res) => {
       return res.json({ ...out, requestId });
     } else if (mime === "application/pdf") {
       const effMaxPages = coerceMaxPages(maxPages);
+      if (buf.length === 0) {
+        return bad(res, 400, "PDF is empty or corrupt", { code: "pdf_empty" });
+      }
       const wantsPreslice = getPdfPresliceEnabled();
       const softLimitEnabled = getPdfSoftLimitEnabled();
       const azure = getAzureConfig();
