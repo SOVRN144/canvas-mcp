@@ -131,12 +131,132 @@ function verifySignature(req) {
 function bytesFromBase64Strict(b64) {
   if (typeof b64 !== "string") return null;
   const clean = b64.replace(/\s+/g, "");
-  const ok = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(clean);
-  if (!ok) return null;
-  const buf = Buffer.from(clean, "base64");
+  if (clean.length === 0) return Buffer.alloc(0);
+
+  const len = clean.length;
+  if (len % 4 === 1) return null; // Base64 strings can't have remainder 1
+
+  let paddingIndex = len;
+  for (let i = 0; i < len; i++) {
+    const code = clean.charCodeAt(i);
+    const isAlpha = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    const isDigit = code >= 48 && code <= 57;
+    const isPlus = code === 43;
+    const isSlash = code === 47;
+    const isEquals = code === 61;
+    if (!(isAlpha || isDigit || isPlus || isSlash || isEquals)) {
+      return null;
+    }
+    if (isEquals) {
+      if (paddingIndex === len) paddingIndex = i;
+    } else if (paddingIndex !== len) {
+      // Non '=' after padding started
+      return null;
+    }
+  }
+
+  const paddingLength = paddingIndex === len ? 0 : len - paddingIndex;
+  if (paddingLength > 2) return null;
+  if (paddingLength > 0) {
+    for (let i = paddingIndex; i < len; i++) {
+      if (clean.charCodeAt(i) !== 61) return null;
+    }
+  }
+
+  let buf;
+  try {
+    buf = Buffer.from(clean, "base64");
+  } catch {
+    return null;
+  }
   const canon = buf.toString("base64").replace(/=+$/, "");
   const target = clean.replace(/=+$/, "");
   return canon === target ? buf : null;
+}
+
+const MAX_ERROR_STRING = 2_048;
+const MAX_ERROR_ENTRIES = 20;
+const MAX_ERROR_ARRAY_ITEMS = 20;
+const MAX_ERROR_DEPTH = 3;
+
+function truncateErrorString(str) {
+  if (typeof str !== "string") return "";
+  if (str.length <= MAX_ERROR_STRING) return str;
+  return `${str.slice(0, MAX_ERROR_STRING)}…(+${str.length - MAX_ERROR_STRING} chars)`;
+}
+
+function sanitizeErrorValue(value, depth = 0, seen = new WeakSet()) {
+  if (value == null) return undefined;
+  if (typeof value === "string") return truncateErrorString(value);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Error) {
+    const out = {
+      message: truncateErrorString(value.message || value.toString())
+    };
+    if (value.name && value.name !== "Error") out.name = value.name;
+    if (value.code) out.code = String(value.code);
+    if (typeof value.status === "number") out.status = value.status;
+    return out;
+  }
+  if (Buffer.isBuffer(value)) return `<Buffer length=${value.length}>`;
+  if (ArrayBuffer.isView(value)) return `<${value.constructor?.name || "TypedArray"} length=${value.length}>`;
+  if (typeof value !== "object") return truncateErrorString(String(value));
+
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (depth >= MAX_ERROR_DEPTH) return "[Truncated]";
+
+  if (Array.isArray(value)) {
+    const out = [];
+    const limit = Math.min(value.length, MAX_ERROR_ARRAY_ITEMS);
+    for (let i = 0; i < limit; i++) {
+      const entry = value[i];
+      if (entry == null) {
+        out.push(entry);
+      } else if (typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean") {
+        out.push(entry);
+      } else {
+        const clean = sanitizeErrorValue(entry, depth + 1, seen);
+        if (clean !== undefined && typeof clean !== "object") {
+          out.push(clean);
+        }
+      }
+    }
+    if (value.length > limit) {
+      out.push(`[+${value.length - limit} items truncated]`);
+    }
+    return out;
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length > MAX_ERROR_ENTRIES) {
+    return {
+      _truncated: true,
+      keys: entries.slice(0, MAX_ERROR_ENTRIES).map(([key]) => key),
+      total: entries.length
+    };
+  }
+
+  const out = {};
+  for (const [key, val] of entries) {
+    const item = sanitizeErrorValue(val, depth + 1, seen);
+    if (item !== undefined) out[key] = item;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeErrorDetail(detail) {
+  const sanitized = sanitizeErrorValue(detail);
+  if (sanitized === undefined) return undefined;
+  if (typeof sanitized === "string" || typeof sanitized === "number" || typeof sanitized === "boolean") return sanitized;
+  if (Array.isArray(sanitized) || (typeof sanitized === "object" && sanitized !== null)) return sanitized;
+  return undefined;
+}
+
+function sanitizeErrorMeta(meta) {
+  const sanitized = sanitizeErrorValue(meta);
+  return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) ? sanitized : undefined;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -302,7 +422,16 @@ async function ocrWithOpenAiPreslice({ data, maxPages }) {
       const current = nextIndex++;
       if (current >= pngBuffers.length) break;
       const png = pngBuffers[current];
-      const result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      let result;
+      try {
+        result = await ocrWithOpenAI({ mime: "image/png", data: png, client });
+      } catch (err) {
+        const wrapped = new Error(err?.message || "OpenAI page OCR failed");
+        wrapped.status = err?.status || 502;
+        wrapped.code = err?.code || "openai_page_failed";
+        wrapped.detail = { page: current + 1, error: String(err?.message || err) };
+        throw wrapped;
+      }
       outTexts[current] = result.text || "";
       outPages[current] = current + 1;
     }
@@ -654,11 +783,13 @@ app.post("/extract", async (req, res) => {
       message,
       requestId
     };
-    if (err.meta && typeof err.meta === "object" && err.meta !== null) {
-      errorPayload.meta = err.meta;
+    const safeMeta = sanitizeErrorMeta(err?.meta);
+    if (safeMeta) {
+      errorPayload.meta = safeMeta;
     }
-    if (err?.detail && (typeof err.detail === "string" || (typeof err.detail === "object" && err.detail !== null))) {
-      errorPayload.detail = err.detail;
+    const safeDetail = sanitizeErrorDetail(err?.detail);
+    if (safeDetail !== undefined) {
+      errorPayload.detail = safeDetail;
     }
     return res.status(status).json({ error: errorPayload });
   }
